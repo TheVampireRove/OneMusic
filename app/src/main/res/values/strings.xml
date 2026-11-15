@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">OneMusic</string>
+    <string name="lyrics_sync_title">LRCLIB Batch Lyrics Sync</string>
+    <string name="lyrics_sync_subtitle">Automatically download &amp; cache synced .lrc lyrics for offline playback</string>
+    <string name="lyrics_auto_fetch_title">Auto-Fetch Lyrics for New Tracks</string>
+    <string name="lyrics_auto_fetch_desc">Runs rate-limited background sync when new device tracks are scanned</string>
+    <string name="lyrics_wifi_only_title">Wi-Fi Only for Batch Sync</string>
+    <string name="lyrics_wifi_only_desc">Only run bulk lyrics downloads on unmetered Wi-Fi connections</string>
+    <string name="lyrics_fetch_all_now">Fetch All Missing Lyrics Now</string>
+    <string name="lyrics_retry_failed">Retry Failed / Missing Lookups</string>
+    <string name="lyrics_cancel_sync">Cancel</string>
+</resources>

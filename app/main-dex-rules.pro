@@ -1,0 +1,5 @@
+-keep class com.example.MainActivity { *; }
+-keep class * extends android.app.Activity { *; }
+-keep class * extends android.app.Application { *; }
+-keep class * extends android.app.Service { *; }
+-keep class com.example.** { *; }
