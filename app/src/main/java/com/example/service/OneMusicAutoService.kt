@@ -9,16 +9,19 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
+import androidx.annotation.OptIn
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaStyleNotificationHelper
 import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.example.MainActivity
 import com.example.R
@@ -45,6 +48,7 @@ import kotlinx.coroutines.launch
  * 3. Foreground service with ongoing MediaStyle notification to prevent process killing during wireless projection.
  * 4. Backward compatible with legacy MediaBrowserCompat / Android Auto vehicle controllers.
  */
+@OptIn(UnstableApi::class)
 class OneMusicAutoService : MediaLibraryService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -74,31 +78,34 @@ class OneMusicAutoService : MediaLibraryService() {
 
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel()
         try {
             playbackManager.initContext(this)
 
-            val player = playbackManager.audioEngine.exoPlayer ?: return
+            val player = playbackManager.audioEngine.exoPlayer
+            if (player != null) {
+                val intent = Intent(this, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra("OPEN_NOW_PLAYING", true)
+                }
+                val pendingIntent = PendingIntent.getActivity(
+                    this,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
 
-            val intent = Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra("OPEN_NOW_PLAYING", true)
+                mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibrarySessionCallback())
+                    .setSessionActivity(pendingIntent)
+                    .setId("OneMusicAutoSession")
+                    .build()
+
+                observePlaybackState()
             }
-            val pendingIntent = PendingIntent.getActivity(
-                this,
-                0,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibrarySessionCallback())
-                .setSessionActivity(pendingIntent)
-                .setId("OneMusicAutoSession")
-                .build()
-
-            createNotificationChannel()
-            observePlaybackState()
+        } catch (_: Exception) {
+        } finally {
             publishOngoingNotification()
-        } catch (_: Exception) {}
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
@@ -380,7 +387,7 @@ class OneMusicAutoService : MediaLibraryService() {
             return if (track != null) {
                 Futures.immediateFuture(LibraryResult.ofItem(playbackManager.trackToMediaItem(track), null))
             } else {
-                Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+                Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
             }
         }
 

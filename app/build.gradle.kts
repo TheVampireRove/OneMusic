@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.onemusic.kxmpzq"
     minSdk = 24
     targetSdk = 36
-    versionCode = 34
-    versionName = "34.0"
+    versionCode = 38
+    versionName = "38.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     multiDexEnabled = true

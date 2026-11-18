@@ -21,6 +21,8 @@ import com.example.model.TabletopControlPositions
 import com.example.model.TabletopControlStyle
 import com.example.model.TabletopTopLayout
 import com.example.model.ButtonAnimationEffect
+import com.example.model.LyricsAnimationSpeed
+import com.example.model.LyricsAnimationStyle
 import com.example.model.VisualizerStyle
 import org.json.JSONObject
 import java.io.File
@@ -183,6 +185,9 @@ object AppSettingsCache {
                 put("liveNotificationSoundBadge", settings.liveNotificationSoundBadge)
                 put("autoFetchLyricsOnScan", settings.autoFetchLyricsOnScan)
                 put("lyricsSyncWifiOnly", settings.lyricsSyncWifiOnly)
+                put("lyricsAnimationStyle", settings.lyricsAnimationStyle.name)
+                put("lyricsAnimationSpeed", settings.lyricsAnimationSpeed.name)
+                put("lyricsGlowEnabled", settings.lyricsGlowEnabled)
             }
 
             val file = File(context.filesDir, SETTINGS_FILE_NAME)
@@ -218,6 +223,9 @@ object AppSettingsCache {
             val sortOption = safeValueOf<SortOption>(obj.optString("sortOption")) ?: SortOption.TITLE_AZ
             val activeFilter = safeValueOf<FilterType>(obj.optString("activeFilter")) ?: FilterType.ALL
             val buttonAnimationEffect = safeValueOf<ButtonAnimationEffect>(obj.optString("buttonAnimationEffect")) ?: ButtonAnimationEffect.BOUNCY_SPRING
+            val lyricsAnimationStyle = safeValueOf<LyricsAnimationStyle>(obj.optString("lyricsAnimationStyle")) ?: LyricsAnimationStyle.SMOOTH_FLOAT
+            val lyricsAnimationSpeed = safeValueOf<LyricsAnimationSpeed>(obj.optString("lyricsAnimationSpeed")) ?: LyricsAnimationSpeed.BALANCED
+            val lyricsGlowEnabled = obj.optBoolean("lyricsGlowEnabled", true)
 
             val elemObj = obj.optJSONObject("elementColors")
             val elementColors = if (elemObj != null) {
@@ -402,7 +410,10 @@ object AppSettingsCache {
                 liveNotificationSoundBadge = obj.optBoolean("liveNotificationSoundBadge", true),
                 buttonAnimationEffect = buttonAnimationEffect,
                 autoFetchLyricsOnScan = obj.optBoolean("autoFetchLyricsOnScan", false),
-                lyricsSyncWifiOnly = obj.optBoolean("lyricsSyncWifiOnly", false)
+                lyricsSyncWifiOnly = obj.optBoolean("lyricsSyncWifiOnly", false),
+                lyricsAnimationStyle = lyricsAnimationStyle,
+                lyricsAnimationSpeed = lyricsAnimationSpeed,
+                lyricsGlowEnabled = lyricsGlowEnabled
             )
         } catch (_: Exception) {
             return AppSettings()

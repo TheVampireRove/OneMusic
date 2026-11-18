@@ -12,6 +12,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.model.ButtonAnimationEffect
+import com.example.model.LyricsAnimationSpeed
+import com.example.model.LyricsAnimationStyle
 import com.example.model.ProgressBarDesign
 import com.example.model.ProgressBarThickness
 import com.example.model.TabletopButtonSize
@@ -197,10 +199,17 @@ fun FlexModePlayer(
     },
     onUpdateControlPositions: (TabletopControlPositions) -> Unit = {},
     elementColors: ElementColors = ElementColors(),
+    useCustomElementColors: Boolean = false,
     buttonAnimationEffect: ButtonAnimationEffect = ButtonAnimationEffect.BOUNCY_SPRING,
+    lyricsAnimationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
+    lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
+    lyricsGlowEnabled: Boolean = true,
     isLoadingLyrics: Boolean = false,
     onImportLyricsUri: (android.net.Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
+    loadEditableLyrics: (suspend () -> String)? = null,
+    onRefetchLyrics: (() -> Unit)? = null,
+    onClearLyrics: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -256,25 +265,28 @@ fun FlexModePlayer(
     }
 
     val animatedPrimary by animateColorAsState(track.primaryColor, label = "flex_bg_primary")
+    val animatedSecondary by animateColorAsState(track.secondaryColor, label = "flex_bg_secondary")
     val animatedAccent by animateColorAsState(track.accentColor, label = "flex_bg_accent")
 
-    // Comprehensive Tabletop Element Colors
-    val ttTopBg = parseHexColor(elementColors.tabletopTopHalfBackground) ?: animatedPrimary.copy(alpha = 0.32f)
-    val ttBottomBg = parseHexColor(elementColors.tabletopBottomHalfBackground) ?: Color(0xFF16182B)
-    val ttReflection = parseHexColor(elementColors.tabletopReflectionTint) ?: Color(0x40000000)
-    val ttPlayBtn = (parseHexColor(elementColors.tabletopPlayButton) ?: parseHexColor(elementColors.playerControlPlayBtn) ?: animatedPrimary).copy(alpha = 1.0f)
-    val ttPlayIcon = parseHexColor(elementColors.tabletopPlayIcon) ?: Color.White
-    val ttSkipBtns = parseHexColor(elementColors.tabletopSkipButtons) ?: parseHexColor(elementColors.playerControlSkipBtn) ?: Color.White
-    val ttSecBtns = parseHexColor(elementColors.tabletopSecondaryButtons) ?: Color(0x88FFFFFF)
-    val ttActiveTint = parseHexColor(elementColors.tabletopActiveButtonTint) ?: animatedAccent
-    val ttTitle = parseHexColor(elementColors.tabletopTrackTitle) ?: Color.White
-    val ttArtist = parseHexColor(elementColors.tabletopTrackArtist) ?: Color(0x99FFFFFF)
-    val ttLyrics = parseHexColor(elementColors.tabletopLyricsText) ?: Color(0x99FFFFFF)
-    val ttLyricsHighlight = parseHexColor(elementColors.tabletopLyricsHighlight) ?: animatedAccent
-    val ttScrubberActive = parseHexColor(elementColors.tabletopScrubberActive) ?: animatedAccent
-    val ttScrubberInactive = parseHexColor(elementColors.tabletopScrubberInactive) ?: Color(0x35FFFFFF)
-    val ttVolume = parseHexColor(elementColors.tabletopVolumeTrack) ?: parseHexColor(elementColors.playerVolumeTrack) ?: animatedAccent
-    val ttVis = parseHexColor(elementColors.tabletopVisualizerColor) ?: animatedAccent
+    // Comprehensive Tabletop Element Colors (only apply custom hex overrides when Individual Elements mode is active)
+    val customTopBg = if (useCustomElementColors) parseHexColor(elementColors.tabletopTopHalfBackground) else null
+    val ttTopBg = customTopBg ?: animatedPrimary.copy(alpha = 0.42f)
+    val ttTopSecondary = customTopBg ?: animatedSecondary.copy(alpha = 0.24f)
+    val ttBottomBg = (if (useCustomElementColors) parseHexColor(elementColors.tabletopBottomHalfBackground) else null) ?: Color(0xFF16182B)
+    val ttReflection = (if (useCustomElementColors) parseHexColor(elementColors.tabletopReflectionTint) else null) ?: Color(0x40000000)
+    val ttPlayBtn = ((if (useCustomElementColors) parseHexColor(elementColors.tabletopPlayButton) ?: parseHexColor(elementColors.playerControlPlayBtn) else null) ?: animatedPrimary).copy(alpha = 1.0f)
+    val ttPlayIcon = (if (useCustomElementColors) parseHexColor(elementColors.tabletopPlayIcon) else null) ?: Color.White
+    val ttSkipBtns = (if (useCustomElementColors) parseHexColor(elementColors.tabletopSkipButtons) ?: parseHexColor(elementColors.playerControlSkipBtn) else null) ?: Color.White
+    val ttSecBtns = (if (useCustomElementColors) parseHexColor(elementColors.tabletopSecondaryButtons) else null) ?: Color(0x88FFFFFF)
+    val ttActiveTint = (if (useCustomElementColors) parseHexColor(elementColors.tabletopActiveButtonTint) else null) ?: animatedAccent
+    val ttTitle = (if (useCustomElementColors) parseHexColor(elementColors.tabletopTrackTitle) else null) ?: Color.White
+    val ttArtist = (if (useCustomElementColors) parseHexColor(elementColors.tabletopTrackArtist) else null) ?: Color(0x99FFFFFF)
+    val ttLyrics = (if (useCustomElementColors) parseHexColor(elementColors.tabletopLyricsText) else null) ?: Color(0x99FFFFFF)
+    val ttLyricsHighlight = (if (useCustomElementColors) parseHexColor(elementColors.tabletopLyricsHighlight) else null) ?: animatedAccent
+    val ttScrubberActive = (if (useCustomElementColors) parseHexColor(elementColors.tabletopScrubberActive) else null) ?: animatedAccent
+    val ttScrubberInactive = (if (useCustomElementColors) parseHexColor(elementColors.tabletopScrubberInactive) else null) ?: Color(0x35FFFFFF)
+    val ttVolume = (if (useCustomElementColors) parseHexColor(elementColors.tabletopVolumeTrack) ?: parseHexColor(elementColors.playerVolumeTrack) else null) ?: animatedAccent
+    val ttVis = (if (useCustomElementColors) parseHexColor(elementColors.tabletopVisualizerColor) else null) ?: animatedAccent
 
     val insetsToUse = if (tabletopImmersiveMode) WindowInsets(0, 0, 0, 0) else WindowInsets.safeDrawing
 
@@ -284,7 +296,7 @@ fun FlexModePlayer(
             .background(Color(0xFF0C0D17))
             .testTag("flex_mode_player")
     ) {
-        // Ambient glow
+        // Ambient glow synced with track album art colors
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -292,9 +304,10 @@ fun FlexModePlayer(
                     brush = Brush.radialGradient(
                         colors = listOf(
                             ttTopBg,
+                            ttTopSecondary,
                             Color(0xFF090A13)
                         ),
-                        radius = 1000f
+                        radius = 1100f
                     )
                 )
         )
@@ -311,6 +324,16 @@ fun FlexModePlayer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    .background(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                ttTopBg,
+                                ttTopSecondary,
+                                Color(0xCC0D0E1B)
+                            ),
+                            radius = 950f
+                        )
+                    )
                     .padding(horizontal = 20.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -427,11 +450,18 @@ fun FlexModePlayer(
                                     primaryColor = ttLyricsHighlight,
                                     inactiveTextColor = ttLyrics,
                                     isLoading = isLoadingLyrics,
+                                    trackDurationMs = track.durationMs,
+                                    animationStyle = lyricsAnimationStyle,
+                                    animationSpeed = lyricsAnimationSpeed,
+                                    glowEnabled = lyricsGlowEnabled,
                                     onSelectLyric = { line ->
                                         if (line.isSynced) onSeek(line.timeMs)
                                     },
                                     onImportLyricsUri = onImportLyricsUri,
-                                    onSavePastedLyrics = onSavePastedLyrics
+                                    onSavePastedLyrics = onSavePastedLyrics,
+                                    loadEditableLyrics = loadEditableLyrics,
+                                    onRefetchLyrics = onRefetchLyrics,
+                                    onClearLyrics = onClearLyrics
                                 )
                             }
                             DisplayMode.SPLIT -> {
@@ -479,11 +509,18 @@ fun FlexModePlayer(
                                             primaryColor = ttLyricsHighlight,
                                             inactiveTextColor = ttLyrics,
                                             isLoading = isLoadingLyrics,
+                                            trackDurationMs = track.durationMs,
+                                            animationStyle = lyricsAnimationStyle,
+                                            animationSpeed = lyricsAnimationSpeed,
+                                            glowEnabled = lyricsGlowEnabled,
                                             onSelectLyric = { line ->
                                                 if (line.isSynced) onSeek(line.timeMs)
                                             },
                                             onImportLyricsUri = onImportLyricsUri,
-                                            onSavePastedLyrics = onSavePastedLyrics
+                                            onSavePastedLyrics = onSavePastedLyrics,
+                                            loadEditableLyrics = loadEditableLyrics,
+                                            onRefetchLyrics = onRefetchLyrics,
+                                            onClearLyrics = onClearLyrics
                                         )
                                     }
                                 }
@@ -512,10 +549,10 @@ fun FlexModePlayer(
                                         },
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    val visPeak = parseHexColor(elementColors.visualizerPeakColor)
-                                    val visBar = parseHexColor(elementColors.tabletopVisualizerColor) ?: parseHexColor(elementColors.visualizerBarColor)
-                                    val visBase = parseHexColor(elementColors.visualizerBaseColor)
-                                    val visGlow = parseHexColor(elementColors.visualizerGlowColor)
+                                    val visPeak = if (useCustomElementColors) parseHexColor(elementColors.visualizerPeakColor) else null
+                                    val visBar = if (useCustomElementColors) parseHexColor(elementColors.tabletopVisualizerColor) ?: parseHexColor(elementColors.visualizerBarColor) else null
+                                    val visBase = if (useCustomElementColors) parseHexColor(elementColors.visualizerBaseColor) else null
+                                    val visGlow = if (useCustomElementColors) parseHexColor(elementColors.visualizerGlowColor) else null
                                     val fullTopHeight = maxHeight
 
                                     AudioVisualizer(
@@ -1928,44 +1965,32 @@ private fun NetflixDuoTabletopConsole(
         val currentOnVolumeChange by rememberUpdatedState(onVolumeChange)
         val currentOnSpeedChange by rememberUpdatedState(onSpeedChange)
 
-        val (prevTargetScaleX, prevTargetScaleY, prevTargetRotation) = when (buttonAnimationEffect) {
-            ButtonAnimationEffect.BOUNCY_SPRING -> Triple(if (isPrevPressed) 0.85f else 1.0f, if (isPrevPressed) 0.85f else 1.0f, if (isPrevPressed) -8f else 0f)
-            ButtonAnimationEffect.ROTATION_TILT -> Triple(if (isPrevPressed) 0.88f else 1.0f, if (isPrevPressed) 0.88f else 1.0f, if (isPrevPressed) -16f else 0f)
-            ButtonAnimationEffect.NEON_GLOW_POP -> Triple(if (isPrevPressed) 1.20f else 1.0f, if (isPrevPressed) 1.20f else 1.0f, 0f)
-            ButtonAnimationEffect.JELLY_SQUISH -> Triple(if (isPrevPressed) 1.25f else 1.0f, if (isPrevPressed) 0.78f else 1.0f, if (isPrevPressed) -4f else 0f)
-            ButtonAnimationEffect.SUBTLE_HAPTIC -> Triple(if (isPrevPressed) 0.95f else 1.0f, if (isPrevPressed) 0.95f else 1.0f, 0f)
-        }
-
-        val (nextTargetScaleX, nextTargetScaleY, nextTargetRotation) = when (buttonAnimationEffect) {
-            ButtonAnimationEffect.BOUNCY_SPRING -> Triple(if (isNextPressed) 0.85f else 1.0f, if (isNextPressed) 0.85f else 1.0f, if (isNextPressed) 8f else 0f)
-            ButtonAnimationEffect.ROTATION_TILT -> Triple(if (isNextPressed) 0.88f else 1.0f, if (isNextPressed) 0.88f else 1.0f, if (isNextPressed) 16f else 0f)
-            ButtonAnimationEffect.NEON_GLOW_POP -> Triple(if (isNextPressed) 1.20f else 1.0f, if (isNextPressed) 1.20f else 1.0f, 0f)
-            ButtonAnimationEffect.JELLY_SQUISH -> Triple(if (isNextPressed) 1.25f else 1.0f, if (isNextPressed) 0.78f else 1.0f, if (isNextPressed) 4f else 0f)
-            ButtonAnimationEffect.SUBTLE_HAPTIC -> Triple(if (isNextPressed) 0.95f else 1.0f, if (isNextPressed) 0.95f else 1.0f, 0f)
-        }
-
-        val (playTargetScaleX, playTargetScaleY, playTargetRotation) = when (buttonAnimationEffect) {
+        fun tileAnimTargets(pressed: Boolean): Triple<Float, Float, Float> = when (buttonAnimationEffect) {
             ButtonAnimationEffect.BOUNCY_SPRING -> {
-                val s = if (isPlayPressed) 0.88f else 1.0f
+                val s = if (pressed) 0.88f else 1.0f
                 Triple(s, s, 0f)
             }
             ButtonAnimationEffect.ROTATION_TILT -> {
-                val s = if (isPlayPressed) 0.88f else 1.0f
-                val r = if (isPlayPressed) 6f else 0f
+                val s = if (pressed) 0.88f else 1.0f
+                val r = if (pressed) 6f else 0f
                 Triple(s, s, r)
             }
             ButtonAnimationEffect.NEON_GLOW_POP -> {
-                val s = if (isPlayPressed) 0.92f else 1.0f
+                val s = if (pressed) 0.92f else 1.0f
                 Triple(s, s, 0f)
             }
             ButtonAnimationEffect.JELLY_SQUISH -> {
-                if (isPlayPressed) Triple(1.06f, 0.85f, 0f) else Triple(1.0f, 1.0f, 0f)
+                if (pressed) Triple(1.06f, 0.85f, 0f) else Triple(1.0f, 1.0f, 0f)
             }
             ButtonAnimationEffect.SUBTLE_HAPTIC -> {
-                val s = if (isPlayPressed) 0.96f else 1.0f
+                val s = if (pressed) 0.96f else 1.0f
                 Triple(s, s, 0f)
             }
         }
+
+        val (prevTargetScaleX, prevTargetScaleY, prevTargetRotation) = tileAnimTargets(isPrevPressed)
+        val (nextTargetScaleX, nextTargetScaleY, nextTargetRotation) = tileAnimTargets(isNextPressed)
+        val (playTargetScaleX, playTargetScaleY, playTargetRotation) = tileAnimTargets(isPlayPressed)
 
         val (repeatTargetScaleX, repeatTargetScaleY) = when (buttonAnimationEffect) {
             ButtonAnimationEffect.BOUNCY_SPRING -> (if (isRepeatPressed) 0.85f else 1.0f) to (if (isRepeatPressed) 0.85f else 1.0f)

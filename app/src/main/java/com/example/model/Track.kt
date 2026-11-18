@@ -29,11 +29,21 @@ enum class CoverArtType {
     COSMIC, LOFI, NEON, SUNSET, FOREST, URBAN
 }
 
+data class LyricWord(
+    val timeMs: Long,
+    val text: String,
+    val endTimeMs: Long? = null
+)
+
 data class LyricLine(
     val timeMs: Long,
     val text: String,
-    val isSynced: Boolean = true
-)
+    val isSynced: Boolean = true,
+    val words: List<LyricWord> = emptyList()
+) {
+    val hasWordSync: Boolean
+        get() = words.isNotEmpty()
+}
 
 data class Track(
     val id: String,

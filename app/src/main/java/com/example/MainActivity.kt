@@ -105,6 +105,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -274,6 +275,7 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
     val playlistsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val albumsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val albumsGridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
+    val artistsGridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
     val artistsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val favoritesListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val albumDetailListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
@@ -409,6 +411,21 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
         val intent = activity?.intent
         if (intent?.getBooleanExtra("OPEN_NOW_PLAYING", false) == true) {
             viewModel.expandPlayer()
+        } else if (intent?.action == android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH) {
+            val query = intent.getStringExtra(android.app.SearchManager.QUERY)?.trim().orEmpty()
+            val all = viewModel.tracks.value
+            val matchIndex = if (query.isNotEmpty()) {
+                all.indexOfFirst {
+                    it.title.contains(query, ignoreCase = true) ||
+                        it.artist.contains(query, ignoreCase = true) ||
+                        it.album.contains(query, ignoreCase = true)
+                }
+            } else {
+                0
+            }
+            if (all.isNotEmpty()) {
+                viewModel.playFromContext(all, if (matchIndex >= 0) matchIndex else 0)
+            }
         }
     }
 
@@ -543,10 +560,17 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                     onTrackClick = { viewModel.playTrack(it) },
                     onPlayFromContext = onPlayFromContext,
                     elementColors = settings.elementColors,
+                    useCustomElementColors = settings.useCustomElementColors || settings.themeEngine == DynamicThemeEngine.INDIVIDUAL_ELEMENTS,
                     buttonAnimationEffect = settings.buttonAnimationEffect,
+                    lyricsAnimationStyle = settings.lyricsAnimationStyle,
+                    lyricsAnimationSpeed = settings.lyricsAnimationSpeed,
+                    lyricsGlowEnabled = settings.lyricsGlowEnabled,
                     isLoadingLyrics = isLoadingLyrics,
                     onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
-                    onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) }
+                    onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
+                    loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
+                    onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
+                    onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) }
                 )
                     }
                     AppLayoutMode.DUAL_PANE -> {
@@ -612,16 +636,23 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                     tracksListState = tracksListState,
                     tabListStates = tabListStates,
                     albumsGridState = albumsGridState,
+                    artistsGridState = artistsGridState,
                     albumDetailListState = albumDetailListState,
                     artistDetailListState = artistDetailListState,
                     artistDetailAlbumsRowState = artistDetailAlbumsRowState,
                     buttonAnimationEffect = settings.buttonAnimationEffect,
+                    lyricsAnimationStyle = settings.lyricsAnimationStyle,
+                    lyricsAnimationSpeed = settings.lyricsAnimationSpeed,
+                    lyricsGlowEnabled = settings.lyricsGlowEnabled,
                     elementColors = settings.elementColors,
                     onPickLocalFiles = onPickFiles,
                     onScanDeviceStorage = onScanStorage,
                     isLoadingLyrics = isLoadingLyrics,
                     onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
-                    onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) }
+                    onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
+                    loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
+                    onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
+                    onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) }
                 )
                     }
                     AppLayoutMode.COVER -> {
@@ -925,7 +956,7 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                             tracks = allTracksList,
                                             sortOption = sortOption,
                                             accentColor = palette.accent,
-                                            listState = tabListStates.getValue(MusicTab.ARTISTS),
+                                            gridState = artistsGridState,
                                             onSelectArtist = { viewModel.selectArtistForDetail(it) },
                                             onSelectTrack = { viewModel.playTrack(it) }
                                         )
@@ -1077,10 +1108,16 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                             viewModel.updateSettings { it.copy(visualizerStyle = newStyle) }
                                         },
                                         buttonAnimationEffect = settings.buttonAnimationEffect,
+                                        lyricsAnimationStyle = settings.lyricsAnimationStyle,
+                                        lyricsAnimationSpeed = settings.lyricsAnimationSpeed,
+                                        lyricsGlowEnabled = settings.lyricsGlowEnabled,
                                         elementColors = settings.elementColors,
                                         isLoadingLyrics = isLoadingLyrics,
                                         onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
-                                        onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) }
+                                        onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
+                                        loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
+                                        onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
+                                        onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) }
                                     )
                                 }
                             }
@@ -2145,38 +2182,50 @@ fun AlbumsTabContent(
                     val leadTrack = albumTracks.first()
                     Box(
                         modifier = Modifier
+                            .fillMaxWidth()
                             .glassmorphism(
                                 shape = OneUISquircleLarge,
                                 backgroundColor = Color(0x2D21243D),
                                 borderWidth = 1.dp
                             )
                             .clickable { onSelectAlbum(albumName) }
-                            .padding(if (cols == 3) 8.dp else 12.dp)
+                            .padding(if (cols == 3) 8.dp else 12.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CoverArtView(
-                                track = leadTrack,
-                                size = if (cols == 3) 95.dp else 135.dp,
-                                cornerRadius = if (cols == 3) 16.dp else 22.dp,
-                                isPlaying = false,
-                                showVinylPeek = false
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = albumName,
-                                style = if (cols == 3) MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
-                                       else MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "${leadTrack.artist} • ${albumTracks.size} Tracks",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xAAFFFFFF),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                            val targetArtSize = minOf(maxWidth, if (cols == 3) 95.dp else 135.dp)
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                CoverArtView(
+                                    track = leadTrack,
+                                    size = targetArtSize,
+                                    cornerRadius = if (cols == 3) 16.dp else 22.dp,
+                                    isPlaying = false,
+                                    showVinylPeek = false
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = albumName,
+                                    style = if (cols == 3) MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                                           else MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    text = "${leadTrack.artist} • ${albumTracks.size} Tracks",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xAAFFFFFF),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                         }
                     }
                 }
@@ -2213,7 +2262,7 @@ fun ArtistsTabContent(
     tracks: List<Track>,
     sortOption: SortOption = SortOption.TITLE_AZ,
     accentColor: Color = Color(0xFF0072DE),
-    listState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
+    gridState: LazyGridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() },
     onSelectArtist: (String) -> Unit = {},
     onSelectTrack: (Track) -> Unit = {}
 ) {
@@ -2229,11 +2278,13 @@ fun ArtistsTabContent(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 38.dp, top = 12.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             items(artists) { (artistName, artistTracks) ->
                 val lead = artistTracks.first()
@@ -2241,41 +2292,47 @@ fun ArtistsTabContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .glassmorphism(
-                            shape = OneUISquircleMedium,
-                            backgroundColor = Color(0x2821243C)
+                            shape = OneUISquircleLarge,
+                            backgroundColor = Color(0x2D21243D),
+                            borderWidth = 1.dp
                         )
                         .clickable { onSelectArtist(artistName) }
-                        .padding(14.dp)
+                        .padding(12.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        CoverArtView(
-                            track = lead,
-                            size = 56.dp,
-                            cornerRadius = 28.dp,
-                            isPlaying = false
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                        val targetArtSize = minOf(maxWidth, 135.dp)
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CoverArtView(
+                                track = lead,
+                                size = targetArtSize,
+                                cornerRadius = 22.dp,
+                                isPlaying = false,
+                                showVinylPeek = false
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = artistName,
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = Color.White
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
                             )
                             Text(
-                                text = "${lead.genre} • ${artistTracks.size} Songs available",
+                                text = "${lead.genre} • ${artistTracks.size} Tracks",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xAAFFFFFF)
+                                color = Color(0xAAFFFFFF),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
-                        Icon(
-                            imageVector = Icons.Default.Headphones,
-                            contentDescription = "Artist",
-                            tint = lead.accentColor,
-                            modifier = Modifier.size(24.dp)
-                        )
                     }
                 }
             }
@@ -2291,7 +2348,7 @@ fun ArtistsTabContent(
                 }
                 if (targetIndex != -1) {
                     coroutineScope.launch {
-                        listState.scrollToItem(targetIndex)
+                        gridState.scrollToItem(targetIndex)
                     }
                 }
             },

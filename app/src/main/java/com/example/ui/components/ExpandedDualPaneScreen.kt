@@ -64,6 +64,8 @@ import com.example.FilterChipsRow
 import com.example.SortBarRow
 import com.example.model.ElementColors
 import com.example.model.FilterType
+import com.example.model.LyricsAnimationSpeed
+import com.example.model.LyricsAnimationStyle
 import com.example.model.PlayerButtonSize
 import com.example.model.ProgressBarDesign
 import com.example.model.ProgressBarThickness
@@ -159,13 +161,20 @@ fun ExpandedDualPaneScreen(
     tracksListState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
     tabListStates: Map<MusicTab, LazyListState> = emptyMap(),
     albumsGridState: LazyGridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() },
+    artistsGridState: LazyGridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() },
     albumDetailListState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
     artistDetailListState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
     artistDetailAlbumsRowState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
     buttonAnimationEffect: ButtonAnimationEffect = ButtonAnimationEffect.BOUNCY_SPRING,
+    lyricsAnimationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
+    lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
+    lyricsGlowEnabled: Boolean = true,
     isLoadingLyrics: Boolean = false,
     onImportLyricsUri: (android.net.Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
+    loadEditableLyrics: (suspend () -> String)? = null,
+    onRefetchLyrics: (() -> Unit)? = null,
+    onClearLyrics: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isInnerSubscreen = selectedAlbumId != null || selectedArtistId != null || searchQuery.isNotEmpty()
@@ -344,18 +353,11 @@ fun ExpandedDualPaneScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
-                    Text(
-                        text = selectedTab.title,
-                        style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
-                        color = Color.White
-                    )
-                    Text(
-                        text = "Foldable Studio",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0x99FFFFFF)
-                    )
-                }
+                Text(
+                    text = selectedTab.title,
+                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White
+                )
 
                 Box(
                     modifier = Modifier
@@ -524,8 +526,7 @@ fun ExpandedDualPaneScreen(
                                         tracks = allTracks,
                                         sortOption = sortOption,
                                         accentColor = palette.accent,
-                                        listState = tabListStates[MusicTab.ARTISTS]
-                                            ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
+                                        gridState = artistsGridState,
                                         onSelectArtist = { onSelectArtistForDetail(it) },
                                         onSelectTrack = onTrackClick
                                     )
@@ -599,10 +600,16 @@ fun ExpandedDualPaneScreen(
                 onVisualizerStyleChange = onVisualizerStyleChange,
                 elementColors = elementColors,
                 buttonAnimationEffect = buttonAnimationEffect,
+                lyricsAnimationStyle = lyricsAnimationStyle,
+                lyricsAnimationSpeed = lyricsAnimationSpeed,
+                lyricsGlowEnabled = lyricsGlowEnabled,
                 isCollapsible = false,
                 isLoadingLyrics = isLoadingLyrics,
                 onImportLyricsUri = onImportLyricsUri,
                 onSavePastedLyrics = onSavePastedLyrics,
+                loadEditableLyrics = loadEditableLyrics,
+                onRefetchLyrics = onRefetchLyrics,
+                onClearLyrics = onClearLyrics,
                 modifier = Modifier.fillMaxSize()
             )
         }

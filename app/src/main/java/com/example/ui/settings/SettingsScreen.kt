@@ -130,6 +130,8 @@ import com.example.model.AppSettings
 import com.example.model.DualPaneSetting
 import com.example.model.DynamicThemeEngine
 import com.example.model.ElementColors
+import com.example.model.LyricsAnimationSpeed
+import com.example.model.LyricsAnimationStyle
 import com.example.model.MusicTab
 import com.example.model.ButtonAnimationEffect
 import com.example.model.PlayerButtonSize
@@ -172,7 +174,7 @@ enum class SettingsCategory(
     ),
     LYRICS(
         title = "Lyrics & Sync",
-        subtitle = "Auto-fetch on scan, Wi-Fi batch sync, LRCLIB cache & retry",
+        subtitle = "Lyrics animations, auto-fetch, Wi-Fi batch sync & LRCLIB cache",
         icon = Icons.Default.Lyrics,
         tag = "lyrics"
     ),
@@ -2028,6 +2030,22 @@ private fun SettingsCategoryContent(
             }
         }
         SettingsCategory.LYRICS -> {
+            SettingsSectionHeader(
+                title = "Synced Lyrics Animations",
+                icon = Icons.Default.AutoAwesome,
+                accentColor = accentColor
+            )
+
+            SettingsCard {
+                LyricsAnimationSettingsSection(
+                    settings = settings,
+                    accentColor = accentColor,
+                    onUpdateSettings = onUpdateSettings
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
             SettingsSectionHeader(
                 title = "Lyrics & LRCLIB Sync",
                 icon = Icons.Default.Lyrics,
@@ -3902,7 +3920,7 @@ private fun VisualizerStyleSelector(
             color = Color.White
         )
         Text(
-            text = "Select from spectrum bars, frequency lines, smooth waveforms, mirrored bars, particle dots, digital flames, or liquid waves",
+            text = "Choose from 19 reactive visualizers including Mandala, DNA Helix, Fireflies, Supernova, XY Oscilloscope, and Retro Cassette",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0x99FFFFFF)
         )
@@ -3939,6 +3957,12 @@ private fun VisualizerStyleSelector(
                         VisualizerStyle.RETRO_GRID -> Icons.Default.GridView
                         VisualizerStyle.SOUND_BLOX -> Icons.Default.Equalizer
                         VisualizerStyle.RECORD_PLAYING -> Icons.Default.Album
+                        VisualizerStyle.KALEIDOSCOPE_MANDALA -> Icons.Default.AutoAwesome
+                        VisualizerStyle.DNA_DOUBLE_HELIX -> Icons.Default.Waves
+                        VisualizerStyle.FIREFLY_SWARM -> Icons.Default.Whatshot
+                        VisualizerStyle.GALAXY_SUPERNOVA -> Icons.Default.ColorLens
+                        VisualizerStyle.OSCILLOSCOPE_LISSAJOUS -> Icons.Default.Tune
+                        VisualizerStyle.CASSETTE_TAPE -> Icons.Default.MusicNote
                     },
                     contentDescription = null,
                     tint = if (isSelected) accentColor else Color(0x88FFFFFF),
@@ -3969,6 +3993,186 @@ private fun VisualizerStyleSelector(
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
+        }
+    }
+}
+
+@Composable
+private fun LyricsAnimationSettingsSection(
+    settings: AppSettings,
+    accentColor: Color,
+    onUpdateSettings: ((AppSettings) -> AppSettings) -> Unit
+) {
+    val activeStyle = settings.lyricsAnimationStyle
+    val activeSpeed = settings.lyricsAnimationSpeed
+    val glowEnabled = settings.lyricsGlowEnabled
+
+    Column(modifier = Modifier.padding(16.dp)) {
+        Text(
+            text = "Lyrics Line Animation Style",
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = Color.White
+        )
+        Text(
+            text = "Customize how active synced lyrics transition across Cover Screen, Dual-Pane & Tabletop mode",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0x99FFFFFF)
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Style Options
+        LyricsAnimationStyle.entries.forEach { style ->
+            val isSelected = activeStyle == style
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(OneUIPillShape)
+                    .background(if (isSelected) accentColor.copy(alpha = 0.22f) else Color(0x10FFFFFF))
+                    .border(1.dp, if (isSelected) accentColor else Color.Transparent, OneUIPillShape)
+                    .clickable {
+                        onUpdateSettings { it.copy(lyricsAnimationStyle = style) }
+                    }
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                    .testTag("lyrics_anim_style_${style.name.lowercase()}"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = when (style) {
+                        LyricsAnimationStyle.SMOOTH_FLOAT -> Icons.Default.Waves
+                        LyricsAnimationStyle.KARAOKE_SWEEP -> Icons.Default.MusicNote
+                        LyricsAnimationStyle.ELASTIC_POP -> Icons.Default.AutoAwesome
+                        LyricsAnimationStyle.CINEMATIC_FOCUS -> Icons.Default.SmartDisplay
+                        LyricsAnimationStyle.WAVE_FLOW -> Icons.Default.WaterDrop
+                        LyricsAnimationStyle.TYPEWRITER_REVEAL -> Icons.Default.Lyrics
+                    },
+                    contentDescription = null,
+                    tint = if (isSelected) accentColor else Color(0x88FFFFFF),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = style.label,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        ),
+                        color = if (isSelected) Color.White else Color(0xDDFFFFFF)
+                    )
+                    Text(
+                        text = style.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0x88FFFFFF)
+                    )
+                }
+                if (isSelected) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Selected",
+                        tint = accentColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+        HorizontalDivider(color = Color(0x1AFFFFFF))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Transition Speed Selector
+        Text(
+            text = "Transition Speed",
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = Color.White
+        )
+        Text(
+            text = "Adjust how quickly synced lyrics highlight and scroll between lines",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0x99FFFFFF)
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            LyricsAnimationSpeed.entries.forEach { speed ->
+                val isSelected = activeSpeed == speed
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(OneUIPillShape)
+                        .background(if (isSelected) accentColor.copy(alpha = 0.28f) else Color(0x14FFFFFF))
+                        .border(
+                            width = 1.dp,
+                            color = if (isSelected) accentColor else Color(0x22FFFFFF),
+                            shape = OneUIPillShape
+                        )
+                        .clickable {
+                            onUpdateSettings { it.copy(lyricsAnimationSpeed = speed) }
+                        }
+                        .padding(vertical = 10.dp)
+                        .testTag("lyrics_anim_speed_${speed.name.lowercase()}"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = speed.label,
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        color = if (isSelected) Color.White else Color(0xBBFFFFFF),
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        HorizontalDivider(color = Color(0x1AFFFFFF))
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Glow Halo Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(OneUISquircleSmall)
+                .clickable {
+                    onUpdateSettings { it.copy(lyricsGlowEnabled = !glowEnabled) }
+                }
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Active Lyric Glow Halo",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Illuminate the active lyric line with a soft album-themed pill backdrop",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0x99FFFFFF)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = glowEnabled,
+                onCheckedChange = { checked ->
+                    onUpdateSettings { it.copy(lyricsGlowEnabled = checked) }
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = accentColor,
+                    uncheckedThumbColor = Color(0xFF888888),
+                    uncheckedTrackColor = Color(0x33FFFFFF)
+                ),
+                modifier = Modifier.testTag("lyrics_anim_glow_switch")
+            )
         }
     }
 }

@@ -54,7 +54,28 @@ enum class VisualizerStyle(val label: String, val description: String) {
     PARTICLE_RAIN("Cyber Particle Matrix", "Cascading illuminated raindrops with rhythmic density bursts"),
     RETRO_GRID("Synthwave Horizon", "Perspective cyberpunk wireframe grid surging to bass vibrations"),
     SOUND_BLOX("Equalizer Stacks", "3D isometric stacked glowing equalizer blocks"),
-    RECORD_PLAYING("Record Playing", "Spinning vinyl record with dynamic equalizer grooves and tonearm")
+    RECORD_PLAYING("Record Playing", "Spinning vinyl record with dynamic equalizer grooves and tonearm"),
+    KALEIDOSCOPE_MANDALA("Kaleidoscope Mandala", "Rotating symmetrical geometric petals blooming with bass and treble"),
+    DNA_DOUBLE_HELIX("DNA Beat Helix", "Intertwined 3D glowing double helix twisting and pulsing to audio rhythm"),
+    FIREFLY_SWARM("Bioluminescent Swarm", "Glowing orbital fireflies dancing in harmonic Lissajous trails to the beat"),
+    GALAXY_SUPERNOVA("Cosmic Supernova", "Spiral nebula arms and twinkling starfield surging around a pulsing core"),
+    OSCILLOSCOPE_LISSAJOUS("XY Oscilloscope", "Classic phosphor CRT harmonic loops warped by bass and treble"),
+    CASSETTE_TAPE("Retro Cassette Deck", "Spinning dual-reel analog cassette tape with live VU level meters")
+}
+
+enum class LyricsAnimationStyle(val label: String, val description: String) {
+    SMOOTH_FLOAT("Smooth Glide", "Gentle spring scale, soft glow, and smooth focus glide between lines"),
+    KARAOKE_SWEEP("Karaoke Highlight Sweep", "Progressive left-to-right color wipe synced across the active lyric line"),
+    ELASTIC_POP("Elastic Beat Pop", "Playful bouncy spring pop with vibrant halo on every line change"),
+    CINEMATIC_FOCUS("Cinematic Depth Focus", "Active lyric snaps into crisp focus while surrounding lines softly recede"),
+    WAVE_FLOW("Harmonic Wave", "Gentle floating vertical wave motion following the music rhythm"),
+    TYPEWRITER_REVEAL("Lyric Typewriter", "Active line progressively illuminates word-by-word in sync with the track")
+}
+
+enum class LyricsAnimationSpeed(val label: String, val durationMultiplier: Float) {
+    RELAXED("Relaxed", 1.45f),
+    BALANCED("Balanced", 1.0f),
+    SNAPPY("Snappy", 0.55f)
 }
 
 enum class ProgressBarThickness(val label: String, val thicknessDp: Int) {
@@ -292,5 +313,8 @@ data class AppSettings(
     val liveNotificationSoundBadge: Boolean = true,
     val buttonAnimationEffect: ButtonAnimationEffect = ButtonAnimationEffect.BOUNCY_SPRING,
     val autoFetchLyricsOnScan: Boolean = false,
-    val lyricsSyncWifiOnly: Boolean = false
+    val lyricsSyncWifiOnly: Boolean = false,
+    val lyricsAnimationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
+    val lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
+    val lyricsGlowEnabled: Boolean = true
 )

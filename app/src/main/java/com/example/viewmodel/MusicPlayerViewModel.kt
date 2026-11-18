@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class LyricsSyncUiState(
     val isRunning: Boolean = false,
@@ -477,6 +478,59 @@ class MusicPlayerViewModel(
             } finally {
                 _isLoadingLyrics.value = false
             }
+        }
+    }
+
+    suspend fun getEditableLyricsText(context: Context, track: Track): String = withContext(Dispatchers.IO) {
+        LyricsRepository.getEditableRawLyrics(context.applicationContext, track)
+    }
+
+    fun refetchLyricsOnline(context: Context, track: Track) {
+        initContext(context)
+        lyricsFetchJob?.cancel()
+        lyricsFetchJob = viewModelScope.launch {
+            _isLoadingLyrics.value = true
+            try {
+                val appCtx = context.applicationContext
+                withContext(Dispatchers.IO) {
+                    LyricsRepository.clearCachedLyrics(appCtx, track.id)
+                }
+                attemptedLyricsIds.remove(track.id)
+                repository.updateTrackLyrics(track.id, emptyList())
+                attemptedLyricsIds.add(track.id)
+                val resolved = LyricsRepository.resolveLyrics(
+                    appCtx,
+                    track.copy(lyrics = emptyList()),
+                    forceRefresh = true
+                )
+                repository.updateTrackLyrics(track.id, resolved)
+                val summary = withContext(Dispatchers.IO) {
+                    LyricsRepository.getStatusSummary(appCtx, repository.tracks.value)
+                }
+                _lyricsSyncUiState.value = _lyricsSyncUiState.value.copy(statusSummary = summary)
+            } finally {
+                if (currentTrack.value.id == track.id) {
+                    _isLoadingLyrics.value = false
+                }
+            }
+        }
+    }
+
+    fun clearTrackLyrics(context: Context, track: Track) {
+        initContext(context)
+        lyricsFetchJob?.cancel()
+        viewModelScope.launch {
+            val appCtx = context.applicationContext
+            withContext(Dispatchers.IO) {
+                LyricsRepository.clearCachedLyrics(appCtx, track.id)
+            }
+            attemptedLyricsIds.add(track.id)
+            repository.updateTrackLyrics(track.id, emptyList())
+            val summary = withContext(Dispatchers.IO) {
+                LyricsRepository.getStatusSummary(appCtx, repository.tracks.value)
+            }
+            _lyricsSyncUiState.value = _lyricsSyncUiState.value.copy(statusSummary = summary)
+            _isLoadingLyrics.value = false
         }
     }
 

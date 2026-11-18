@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import com.example.model.LyricLine
+import com.example.model.LyricWord
 import com.example.model.Track
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -172,7 +173,7 @@ object LyricsRepository {
     }
 
     /**
-     * Tier 3b: Save manually pasted lyrics text to local cache and parse into [LyricLine]s.
+     * Tier 3b: Save manually pasted or edited lyrics text to local cache and parse into [LyricLine]s.
      */
     suspend fun saveManualLyrics(context: Context, track: Track, rawText: String): List<LyricLine> = withContext(Dispatchers.IO) {
         val trimmed = rawText.trim()
@@ -183,6 +184,36 @@ object LyricsRepository {
             setTrackStatus(context, track.id, LyricsFetchStatus.FOUND)
         }
         parsed
+    }
+
+    /**
+     * Retrieves raw editable lyrics text for [track] so users can replace, fix timing, or upgrade to word-synced lyrics.
+     * Prefers cached `.lrc` file (preserving exact tags/timestamps), then side-car `.lrc`, then serializes in-memory lines.
+     */
+    fun getEditableRawLyrics(context: Context, track: Track): String {
+        val cached = readCachedLyricsText(context, track.id)
+        if (!cached.isNullOrBlank()) return cached
+
+        val sideCar = findSideCarLrcText(context, track)
+        if (!sideCar.isNullOrBlank()) return sideCar
+
+        if (hasUsableInMemoryLyrics(track)) {
+            return serializeLyricsToLrc(track.lyrics)
+        }
+        return ""
+    }
+
+    /**
+     * Deletes locally cached lyrics for [trackId] and resets status to [LyricsFetchStatus.NOT_FETCHED].
+     */
+    fun clearCachedLyrics(context: Context, trackId: String) {
+        try {
+            val file = getCacheFile(context, trackId)
+            if (file.exists()) {
+                file.delete()
+            }
+        } catch (_: Exception) {}
+        setTrackStatus(context, trackId, LyricsFetchStatus.NOT_FETCHED)
     }
 
     fun getCacheDir(context: Context): File {
@@ -635,14 +666,181 @@ object LyricsRepository {
         }
     }
 
+    private val lrcTimestampRegex = Regex("\\[(\\d{1,3}):(\\d{2})(?:[.:](\\d{1,3}))?\\]")
+    private val wordTimestampRegex = Regex("<(\\d{1,3}):(\\d{2})(?:[.:](\\d{1,3}))?>")
+    private val metadataTagRegex = Regex("^\\[(ar|ti|al|au|lr|length|by|offset|re|ve):.*\\]$", RegexOption.IGNORE_CASE)
+
+    private fun parseTimestampMs(minutesStr: String, secondsStr: String, fractionRaw: String): Long {
+        val minutes = minutesStr.toLongOrNull() ?: 0L
+        val seconds = secondsStr.toLongOrNull() ?: 0L
+        val millis = when (fractionRaw.length) {
+            0 -> 0L
+            1 -> (fractionRaw.toLongOrNull() ?: 0L) * 100L
+            2 -> (fractionRaw.toLongOrNull() ?: 0L) * 10L
+            else -> fractionRaw.take(3).toLongOrNull() ?: 0L
+        }
+        return (minutes * 60L + seconds) * 1000L + millis
+    }
+
+    fun formatLrcTimestamp(timeMs: Long): String {
+        val safe = timeMs.coerceAtLeast(0L)
+        val minutes = safe / 60_000L
+        val seconds = (safe % 60_000L) / 1000L
+        val centis = (safe % 1000L) / 10L
+        return String.format(java.util.Locale.US, "[%02d:%02d.%02d]", minutes, seconds, centis)
+    }
+
+    fun formatWordTimestamp(timeMs: Long): String {
+        val safe = timeMs.coerceAtLeast(0L)
+        val minutes = safe / 60_000L
+        val seconds = (safe % 60_000L) / 1000L
+        val centis = (safe % 1000L) / 10L
+        return String.format(java.util.Locale.US, "<%02d:%02d.%02d>", minutes, seconds, centis)
+    }
+
     /**
-     * Parses either timestamped `.lrc` content or plain unsynced lyrics text into [LyricLine] items.
+     * Serializes parsed [LyricLine] items back into LRC or Enhanced Word-Synced LRC text.
+     */
+    fun serializeLyricsToLrc(lyrics: List<LyricLine>): String {
+        if (lyrics.isEmpty()) return ""
+        return lyrics.joinToString("\n") { line ->
+            when {
+                !line.isSynced -> line.text
+                line.words.isNotEmpty() -> {
+                    val wordBody = line.words.joinToString("") { word ->
+                        "${formatWordTimestamp(word.timeMs)}${word.text}"
+                    }
+                    val lastWord = line.words.lastOrNull()
+                    val endTag = if (lastWord?.endTimeMs != null && lastWord.endTimeMs > lastWord.timeMs) {
+                        formatWordTimestamp(lastWord.endTimeMs)
+                    } else {
+                        ""
+                    }
+                    "${formatLrcTimestamp(line.timeMs)}$wordBody$endTag"
+                }
+                else -> "${formatLrcTimestamp(line.timeMs)}${line.text}"
+            }
+        }
+    }
+
+    /**
+     * Shifts all `[mm:ss.xx]` and `<mm:ss.xx>` timestamps inside [rawText] by [deltaMs].
+     */
+    fun shiftLrcTimestamps(rawText: String, deltaMs: Long): String {
+        if (rawText.isBlank() || deltaMs == 0L) return rawText
+        val afterLineTags = lrcTimestampRegex.replace(rawText) { match ->
+            val current = parseTimestampMs(
+                match.groupValues[1],
+                match.groupValues[2],
+                match.groupValues.getOrNull(3).orEmpty()
+            )
+            formatLrcTimestamp((current + deltaMs).coerceAtLeast(0L))
+        }
+        return wordTimestampRegex.replace(afterLineTags) { match ->
+            val current = parseTimestampMs(
+                match.groupValues[1],
+                match.groupValues[2],
+                match.groupValues.getOrNull(3).orEmpty()
+            )
+            formatWordTimestamp((current + deltaMs).coerceAtLeast(0L))
+        }
+    }
+
+    /**
+     * Strips all LRC line/word timestamps and metadata headers to leave clean lyric text lines for re-syncing.
+     */
+    fun stripTimestampsForTapSync(rawText: String): List<String> {
+        if (rawText.isBlank()) return emptyList()
+        return rawText.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !metadataTagRegex.matches(it) }
+            .map { line ->
+                line.replace(lrcTimestampRegex, "")
+                    .replace(wordTimestampRegex, "")
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+            }
+            .filter { it.isNotEmpty() }
+            .toList()
+    }
+
+    private fun extractWordSegments(
+        body: String,
+        matches: List<MatchResult>,
+        defaultStartMs: Long
+    ): List<LyricWord> {
+        if (matches.isEmpty()) return emptyList()
+        val rawWords = mutableListOf<LyricWord>()
+
+        // Any leading text before the first inline/word tag starts at line timestamp
+        val leadingText = body.substring(0, matches.first().range.first)
+        if (leadingText.isNotBlank()) {
+            val firstTagMs = parseTimestampMs(
+                matches.first().groupValues[1],
+                matches.first().groupValues[2],
+                matches.first().groupValues.getOrNull(3).orEmpty()
+            )
+            rawWords.add(
+                LyricWord(
+                    timeMs = defaultStartMs,
+                    text = leadingText.trimStart(),
+                    endTimeMs = firstTagMs.coerceAtLeast(defaultStartMs)
+                )
+            )
+        }
+
+        for (i in matches.indices) {
+            val match = matches[i]
+            val startMs = parseTimestampMs(
+                match.groupValues[1],
+                match.groupValues[2],
+                match.groupValues.getOrNull(3).orEmpty()
+            )
+            val tokenStart = match.range.last + 1
+            val tokenEnd = if (i + 1 < matches.size) matches[i + 1].range.first else body.length
+            val slice = body.substring(tokenStart, tokenEnd)
+
+            if (slice.isBlank()) {
+                // Trailing or standalone timestamp acts as explicit endTimeMs of previous word
+                if (rawWords.isNotEmpty()) {
+                    val prev = rawWords.last()
+                    if (prev.endTimeMs == null || startMs >= prev.timeMs) {
+                        rawWords[rawWords.lastIndex] = prev.copy(endTimeMs = startMs.coerceAtLeast(prev.timeMs))
+                    }
+                }
+            } else {
+                val normalized = if (rawWords.isEmpty()) slice.trimStart() else slice
+                rawWords.add(
+                    LyricWord(
+                        timeMs = startMs,
+                        text = normalized,
+                        endTimeMs = null
+                    )
+                )
+            }
+        }
+
+        // Trim trailing whitespace on the final word and fill in consecutive word endTimeMs
+        if (rawWords.isEmpty()) return emptyList()
+        val lastTrimmed = rawWords.last().text.trimEnd()
+        if (lastTrimmed.isEmpty()) {
+            rawWords.removeAt(rawWords.lastIndex)
+        } else {
+            rawWords[rawWords.lastIndex] = rawWords.last().copy(text = lastTrimmed)
+        }
+
+        return rawWords.mapIndexed { index, word ->
+            val resolvedEnd = word.endTimeMs ?: rawWords.getOrNull(index + 1)?.timeMs?.coerceAtLeast(word.timeMs)
+            word.copy(endTimeMs = resolvedEnd)
+        }
+    }
+
+    /**
+     * Parses line-synced LRC (`[mm:ss.xx]`), Enhanced word-synced LRC (`<mm:ss.xx>word`),
+     * inline `[mm:ss.xx]word` lines, or plain unsynced lyrics text into [LyricLine] items.
      */
     fun parseLyricsContent(rawText: String, durationMs: Long): List<LyricLine> {
         if (rawText.isBlank()) return emptyList()
-
-        val lrcTimestampRegex = Regex("\\[(\\d{1,3}):(\\d{2})(?:[.:](\\d{1,3}))?\\]")
-        val metadataTagRegex = Regex("^\\[(ar|ti|al|au|lr|length|by|offset|re|ve):.*\\]$", RegexOption.IGNORE_CASE)
 
         val syncedLines = mutableListOf<LyricLine>()
         val plainCandidateLines = mutableListOf<String>()
@@ -652,26 +850,112 @@ object LyricsRepository {
             if (trimmed.isEmpty()) return@forEach
             if (metadataTagRegex.matches(trimmed)) return@forEach
 
-            val matches = lrcTimestampRegex.findAll(trimmed).toList()
-            if (matches.isNotEmpty()) {
-                val text = trimmed.replace(lrcTimestampRegex, "").trim()
-                if (text.isNotEmpty()) {
-                    for (match in matches) {
-                        val minutes = match.groupValues[1].toLongOrNull() ?: 0L
-                        val seconds = match.groupValues[2].toLongOrNull() ?: 0L
-                        val fractionRaw = match.groupValues.getOrNull(3).orEmpty()
-                        val millis = when (fractionRaw.length) {
-                            0 -> 0L
-                            1 -> (fractionRaw.toLongOrNull() ?: 0L) * 100L
-                            2 -> (fractionRaw.toLongOrNull() ?: 0L) * 10L
-                            else -> fractionRaw.take(3).toLongOrNull() ?: 0L
-                        }
-                        val timeMs = (minutes * 60L + seconds) * 1000L + millis
-                        syncedLines.add(LyricLine(timeMs = timeMs, text = text, isSynced = true))
+            val bracketMatches = lrcTimestampRegex.findAll(trimmed).toList()
+            val angleMatches = wordTimestampRegex.findAll(trimmed).toList()
+
+            when {
+                // Case 1: Inline bracket timestamps interleaved with text (e.g. "[00:12.00]Hello [00:12.50]world")
+                bracketMatches.size >= 2 && hasTextBetweenBracketTags(trimmed, bracketMatches) -> {
+                    val firstTimeMs = parseTimestampMs(
+                        bracketMatches.first().groupValues[1],
+                        bracketMatches.first().groupValues[2],
+                        bracketMatches.first().groupValues.getOrNull(3).orEmpty()
+                    )
+                    val words = extractWordSegments(trimmed, bracketMatches, firstTimeMs)
+                    val cleanText = trimmed.replace(lrcTimestampRegex, "").replace(wordTimestampRegex, "").trim()
+                    if (cleanText.isNotEmpty()) {
+                        syncedLines.add(
+                            LyricLine(
+                                timeMs = firstTimeMs,
+                                text = cleanText,
+                                isSynced = true,
+                                words = words
+                            )
+                        )
                     }
                 }
-            } else {
-                plainCandidateLines.add(trimmed)
+
+                // Case 2: Enhanced LRC line with `[mm:ss.xx]` line tag(s) and `<mm:ss.xx>` word tags
+                bracketMatches.isNotEmpty() && angleMatches.isNotEmpty() -> {
+                    val bodyWithoutBrackets = trimmed.replace(lrcTimestampRegex, "").trim()
+                    val bodyAngleMatches = wordTimestampRegex.findAll(bodyWithoutBrackets).toList()
+                    val cleanText = bodyWithoutBrackets.replace(wordTimestampRegex, "").trim()
+                    if (cleanText.isNotEmpty()) {
+                        val firstLineTimeMs = parseTimestampMs(
+                            bracketMatches.first().groupValues[1],
+                            bracketMatches.first().groupValues[2],
+                            bracketMatches.first().groupValues.getOrNull(3).orEmpty()
+                        )
+                        val baseWords = extractWordSegments(bodyWithoutBrackets, bodyAngleMatches, firstLineTimeMs)
+                        for (match in bracketMatches) {
+                            val lineTimeMs = parseTimestampMs(
+                                match.groupValues[1],
+                                match.groupValues[2],
+                                match.groupValues.getOrNull(3).orEmpty()
+                            )
+                            val deltaMs = lineTimeMs - firstLineTimeMs
+                            val shiftedWords = if (deltaMs == 0L) {
+                                baseWords
+                            } else {
+                                baseWords.map { w ->
+                                    w.copy(
+                                        timeMs = (w.timeMs + deltaMs).coerceAtLeast(0L),
+                                        endTimeMs = w.endTimeMs?.let { (it + deltaMs).coerceAtLeast(0L) }
+                                    )
+                                }
+                            }
+                            syncedLines.add(
+                                LyricLine(
+                                    timeMs = lineTimeMs,
+                                    text = cleanText,
+                                    isSynced = true,
+                                    words = shiftedWords
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // Case 3: Word tags `<mm:ss.xx>` only without leading `[mm:ss.xx]` bracket
+                bracketMatches.isEmpty() && angleMatches.isNotEmpty() -> {
+                    val firstTimeMs = parseTimestampMs(
+                        angleMatches.first().groupValues[1],
+                        angleMatches.first().groupValues[2],
+                        angleMatches.first().groupValues.getOrNull(3).orEmpty()
+                    )
+                    val words = extractWordSegments(trimmed, angleMatches, firstTimeMs)
+                    val cleanText = trimmed.replace(wordTimestampRegex, "").trim()
+                    if (cleanText.isNotEmpty()) {
+                        syncedLines.add(
+                            LyricLine(
+                                timeMs = firstTimeMs,
+                                text = cleanText,
+                                isSynced = true,
+                                words = words
+                            )
+                        )
+                    }
+                }
+
+                // Case 4: Standard line-synced LRC `[mm:ss.xx]` (supports repeated chorus timestamps)
+                bracketMatches.isNotEmpty() -> {
+                    val text = trimmed.replace(lrcTimestampRegex, "").trim()
+                    if (text.isNotEmpty()) {
+                        for (match in bracketMatches) {
+                            val timeMs = parseTimestampMs(
+                                match.groupValues[1],
+                                match.groupValues[2],
+                                match.groupValues.getOrNull(3).orEmpty()
+                            )
+                            syncedLines.add(LyricLine(timeMs = timeMs, text = text, isSynced = true))
+                        }
+                    }
+                }
+
+                // Case 5: Plain text line
+                else -> {
+                    plainCandidateLines.add(trimmed)
+                }
             }
         }
 
@@ -690,5 +974,13 @@ object LyricsRepository {
                 isSynced = false
             )
         }
+    }
+
+    private fun hasTextBetweenBracketTags(line: String, matches: List<MatchResult>): Boolean {
+        for (i in 0 until matches.size - 1) {
+            val between = line.substring(matches[i].range.last + 1, matches[i + 1].range.first)
+            if (between.isNotBlank()) return true
+        }
+        return false
     }
 }

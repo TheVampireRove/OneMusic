@@ -17,17 +17,24 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode as AnimRepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
@@ -103,8 +110,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import com.example.data.LyricsRepository
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -116,9 +126,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import com.example.model.AlbumArtSize
 import com.example.model.ElementColors
 import com.example.model.LyricLine
+import com.example.model.LyricsAnimationSpeed
+import com.example.model.LyricsAnimationStyle
 import com.example.model.RepeatMode
 import com.example.model.Track
 import com.example.model.VisualizerStyle
@@ -127,6 +142,8 @@ import com.example.ui.theme.OneUISquircleLarge
 import com.example.ui.theme.OneUISquircleMedium
 import com.example.ui.theme.glassmorphism
 import com.example.ui.theme.parseHexColor
+import kotlin.math.PI
+import kotlin.math.sin
 
 enum class DisplayMode {
     ARTWORK, LYRICS, VISUALIZER, SPLIT
@@ -167,8 +184,14 @@ fun NowPlayingScreen(
     elementColors: ElementColors = ElementColors(),
     isCollapsible: Boolean = true,
     isLoadingLyrics: Boolean = false,
+    lyricsAnimationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
+    lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
+    lyricsGlowEnabled: Boolean = true,
     onImportLyricsUri: (Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
+    loadEditableLyrics: (suspend () -> String)? = null,
+    onRefetchLyrics: (() -> Unit)? = null,
+    onClearLyrics: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Only intercept back swipe gesture if the player is collapsible (e.g. modal full-screen in handheld mode).
@@ -375,11 +398,18 @@ fun NowPlayingScreen(
                                 currentPositionMs = activePositionMs,
                                 primaryColor = animatedAccent,
                                 isLoading = isLoadingLyrics,
+                                trackDurationMs = track.durationMs,
+                                animationStyle = lyricsAnimationStyle,
+                                animationSpeed = lyricsAnimationSpeed,
+                                glowEnabled = lyricsGlowEnabled,
                                 onSelectLyric = { line ->
                                     if (line.isSynced) onSeek(line.timeMs)
                                 },
                                 onImportLyricsUri = onImportLyricsUri,
-                                onSavePastedLyrics = onSavePastedLyrics
+                                onSavePastedLyrics = onSavePastedLyrics,
+                                loadEditableLyrics = loadEditableLyrics,
+                                onRefetchLyrics = onRefetchLyrics,
+                                onClearLyrics = onClearLyrics
                             )
                         }
                         DisplayMode.VISUALIZER -> {
@@ -459,11 +489,18 @@ fun NowPlayingScreen(
                                         currentPositionMs = activePositionMs,
                                         primaryColor = animatedAccent,
                                         isLoading = isLoadingLyrics,
+                                        trackDurationMs = track.durationMs,
+                                        animationStyle = lyricsAnimationStyle,
+                                        animationSpeed = lyricsAnimationSpeed,
+                                        glowEnabled = lyricsGlowEnabled,
                                         onSelectLyric = { line ->
                                             if (line.isSynced) onSeek(line.timeMs)
                                         },
                                         onImportLyricsUri = onImportLyricsUri,
-                                        onSavePastedLyrics = onSavePastedLyrics
+                                        onSavePastedLyrics = onSavePastedLyrics,
+                                        loadEditableLyrics = loadEditableLyrics,
+                                        onRefetchLyrics = onRefetchLyrics,
+                                        onClearLyrics = onClearLyrics
                                     )
                                 }
                             }
@@ -969,6 +1006,7 @@ fun VisualizerModePillWithDropdown(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LyricsView(
     lyrics: List<LyricLine>,
@@ -976,12 +1014,21 @@ fun LyricsView(
     primaryColor: Color,
     inactiveTextColor: Color = Color(0x66FFFFFF),
     isLoading: Boolean = false,
+    trackDurationMs: Long = 180_000L,
+    animationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
+    animationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
+    glowEnabled: Boolean = true,
     onSelectLyric: (LyricLine) -> Unit,
     onImportLyricsUri: (Uri) -> Unit = {},
-    onSavePastedLyrics: (String) -> Unit = {}
+    onSavePastedLyrics: (String) -> Unit = {},
+    loadEditableLyrics: (suspend () -> String)? = null,
+    onRefetchLyrics: (() -> Unit)? = null,
+    onClearLyrics: (() -> Unit)? = null
 ) {
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+    val coroutineScope = rememberCoroutineScope()
     var showPasteDialog by remember { mutableStateOf(false) }
+    var editorInitialTab by remember { mutableStateOf(LyricsEditorTab.PASTE_EDIT) }
     var pastedLyricsInput by remember { mutableStateOf("") }
 
     val lrcFilePickerLauncher = rememberLauncherForActivityResult(
@@ -993,7 +1040,37 @@ fun LyricsView(
     }
 
     val isSyncedTrack = lyrics.any { it.isSynced }
+    val hasWordSync = remember(lyrics) { lyrics.any { it.words.isNotEmpty() } }
     val activeIndex = lyrics.indexOfLast { it.timeMs <= currentPositionMs }.coerceAtLeast(0)
+    val speedMult = animationSpeed.durationMultiplier
+
+    val openEditor: (LyricsEditorTab) -> Unit = { tab ->
+        editorInitialTab = tab
+        pastedLyricsInput = LyricsRepository.serializeLyricsToLrc(lyrics)
+        showPasteDialog = true
+        if (loadEditableLyrics != null) {
+            coroutineScope.launch {
+                val loaded = loadEditableLyrics.invoke()
+                if (loaded.isNotBlank()) {
+                    pastedLyricsInput = loaded
+                }
+            }
+        }
+    }
+
+    val waveTransition = rememberInfiniteTransition(label = "lyrics_wave_transition")
+    val wavePhase by waveTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * PI.toFloat()),
+        animationSpec = infiniteRepeatable(
+            animation = tween(
+                durationMillis = (2400f * speedMult).toInt().coerceAtLeast(800),
+                easing = LinearEasing
+            ),
+            repeatMode = AnimRepeatMode.Restart
+        ),
+        label = "lyrics_wave_phase"
+    )
 
     LaunchedEffect(activeIndex, lyrics.size) {
         if (lyrics.isNotEmpty() && isSyncedTrack) {
@@ -1098,6 +1175,7 @@ fun LyricsView(
                         OutlinedButton(
                             onClick = {
                                 pastedLyricsInput = ""
+                                editorInitialTab = LyricsEditorTab.PASTE_EDIT
                                 showPasteDialog = true
                             },
                             border = androidx.compose.foundation.BorderStroke(1.dp, primaryColor.copy(alpha = 0.7f)),
@@ -1144,110 +1222,213 @@ fun LyricsView(
                 }
             }
         } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(vertical = 36.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                itemsIndexed(lyrics) { index, line ->
-                    val isActive = if (isSyncedTrack) index == activeIndex else false
-                    val textColor = when {
-                        isActive -> primaryColor
-                        !isSyncedTrack -> Color(0xEEFFFFFF)
-                        else -> inactiveTextColor
-                    }
-                    val textStyle = if (isActive) {
-                        MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
-                    } else {
-                        MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Normal)
-                    }
+            Box(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(top = 50.dp, bottom = 36.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    itemsIndexed(lyrics) { index, line ->
+                        val isActive = if (isSyncedTrack) index == activeIndex else false
+                        val nextLineTime = lyrics.getOrNull(index + 1)?.timeMs ?: (line.timeMs + 4200L)
+                        val lineDuration = (nextLineTime - line.timeMs).coerceAtLeast(800L)
+                        val lineProgress = if (isActive && isSyncedTrack) {
+                            ((currentPositionMs - line.timeMs).toFloat() / lineDuration.toFloat()).coerceIn(0f, 1f)
+                        } else 0f
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = line.isSynced) { onSelectLyric(line) }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = line.text,
-                            style = textStyle,
-                            color = textColor,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth()
+                        val durationMs = (320f * speedMult).toInt().coerceIn(120, 700)
+                        val targetScale = when {
+                            !isSyncedTrack -> 1.0f
+                            !isActive && animationStyle == LyricsAnimationStyle.CINEMATIC_FOCUS -> 0.87f
+                            !isActive -> 0.95f
+                            animationStyle == LyricsAnimationStyle.ELASTIC_POP -> 1.12f
+                            animationStyle == LyricsAnimationStyle.CINEMATIC_FOCUS -> 1.09f
+                            else -> 1.06f
+                        }
+                        val targetAlpha = when {
+                            !isSyncedTrack -> 0.94f
+                            isActive -> 1.0f
+                            animationStyle == LyricsAnimationStyle.CINEMATIC_FOCUS -> 0.34f
+                            else -> 0.65f
+                        }
+
+                        val animScale by animateFloatAsState(
+                            targetValue = targetScale,
+                            animationSpec = if (animationStyle == LyricsAnimationStyle.ELASTIC_POP && isActive) {
+                                spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = (360f / speedMult).coerceIn(150f, 700f)
+                                )
+                            } else {
+                                tween(durationMillis = durationMs)
+                            },
+                            label = "lyric_scale_$index"
                         )
+                        val animAlpha by animateFloatAsState(
+                            targetValue = targetAlpha,
+                            animationSpec = tween(durationMillis = durationMs),
+                            label = "lyric_alpha_$index"
+                        )
+                        val animColor by animateColorAsState(
+                            targetValue = when {
+                                isActive -> primaryColor
+                                !isSyncedTrack -> Color(0xEEFFFFFF)
+                                else -> inactiveTextColor
+                            },
+                            animationSpec = tween(durationMillis = durationMs),
+                            label = "lyric_color_$index"
+                        )
+                        val animOffsetY by animateFloatAsState(
+                            targetValue = if (isActive && animationStyle == LyricsAnimationStyle.SMOOTH_FLOAT) -4f else 0f,
+                            animationSpec = tween(durationMillis = durationMs),
+                            label = "lyric_offset_y_$index"
+                        )
+
+                        val waveDeltaY = if (animationStyle == LyricsAnimationStyle.WAVE_FLOW && isSyncedTrack) {
+                            if (isActive) sin(wavePhase) * 7f else sin(wavePhase + index * 0.65f) * 2.5f
+                        } else 0f
+
+                        val baseTextStyle = if (isActive) {
+                            MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
+                        } else {
+                            MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Normal)
+                        }
+
+                        val haloBg = if (isActive && glowEnabled && isSyncedTrack) {
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    primaryColor.copy(alpha = 0.20f),
+                                    Color.Transparent
+                                )
+                            )
+                        } else null
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .graphicsLayer {
+                                    scaleX = animScale
+                                    scaleY = animScale
+                                    alpha = animAlpha
+                                    translationY = animOffsetY + waveDeltaY
+                                }
+                                .then(
+                                    if (haloBg != null) {
+                                        Modifier
+                                            .clip(OneUIPillShape)
+                                            .background(haloBg)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .combinedClickable(
+                                    onClick = { if (line.isSynced) onSelectLyric(line) },
+                                    onLongClick = { openEditor(LyricsEditorTab.PASTE_EDIT) }
+                                )
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            when {
+                                isActive && isSyncedTrack && line.words.isNotEmpty() -> {
+                                    WordSyncedLyricText(
+                                        line = line,
+                                        nextLineTimeMs = nextLineTime,
+                                        currentPositionMs = currentPositionMs,
+                                        primaryColor = primaryColor,
+                                        textStyle = baseTextStyle,
+                                        animationStyle = animationStyle
+                                    )
+                                }
+                                isActive && animationStyle == LyricsAnimationStyle.KARAOKE_SWEEP && isSyncedTrack -> {
+                                    val sweepStop = lineProgress.coerceIn(0.03f, 0.93f)
+                                    val fadeEnd = (sweepStop + 0.06f).coerceAtMost(1f)
+                                    val sweepBrush = if (lineProgress >= 0.98f) {
+                                        Brush.horizontalGradient(listOf(primaryColor, primaryColor))
+                                    } else {
+                                        Brush.horizontalGradient(
+                                            0f to primaryColor,
+                                            sweepStop to primaryColor,
+                                            fadeEnd to Color.White.copy(alpha = 0.50f),
+                                            1f to Color.White.copy(alpha = 0.50f)
+                                        )
+                                    }
+                                    Text(
+                                        text = line.text,
+                                        style = baseTextStyle.copy(brush = sweepBrush),
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                isActive && animationStyle == LyricsAnimationStyle.TYPEWRITER_REVEAL && isSyncedTrack -> {
+                                    val rawCut = (line.text.length * lineProgress).toInt().coerceIn(0, line.text.length)
+                                    val wordBoundaryCut = if (rawCut >= line.text.length) {
+                                        line.text.length
+                                    } else {
+                                        val nextSpace = line.text.indexOf(' ', rawCut)
+                                        if (nextSpace != -1 && nextSpace - rawCut <= 4) nextSpace else rawCut
+                                    }
+                                    val annotated = buildAnnotatedString {
+                                        withStyle(SpanStyle(color = primaryColor)) {
+                                            append(line.text.substring(0, wordBoundaryCut))
+                                        }
+                                        withStyle(SpanStyle(color = Color.White.copy(alpha = 0.40f))) {
+                                            append(line.text.substring(wordBoundaryCut))
+                                        }
+                                    }
+                                    Text(
+                                        text = annotated,
+                                        style = baseTextStyle,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                else -> {
+                                    Text(
+                                        text = line.text,
+                                        style = baseTextStyle,
+                                        color = animColor,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
+
+                LyricsControlOverlayBar(
+                    hasWordSync = hasWordSync,
+                    isSyncedTrack = isSyncedTrack,
+                    primaryColor = primaryColor,
+                    onEditLyrics = { openEditor(LyricsEditorTab.PASTE_EDIT) },
+                    onOpenTapSync = { openEditor(LyricsEditorTab.TAP_SYNC) },
+                    onImportFile = { lrcFilePickerLauncher.launch(arrayOf("*/*")) },
+                    onRefetchOnline = onRefetchLyrics,
+                    onClearLyrics = onClearLyrics,
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
             }
         }
     }
 
     if (showPasteDialog) {
-        AlertDialog(
-            onDismissRequest = { showPasteDialog = false },
-            title = {
-                Text(
-                    text = "Paste Lyrics",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                    color = Color.White
-                )
+        val hasExisting = !(lyrics.isEmpty() || (lyrics.size == 1 && lyrics[0].text.contains("No embedded lyrics", ignoreCase = true)))
+        LyricsEditorDialog(
+            initialText = pastedLyricsInput,
+            initialTab = editorInitialTab,
+            hasExistingLyrics = hasExisting,
+            trackDurationMs = trackDurationMs,
+            currentPositionMs = currentPositionMs,
+            primaryColor = primaryColor,
+            onDismiss = { showPasteDialog = false },
+            onSave = { updatedRaw ->
+                onSavePastedLyrics(updatedRaw)
             },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "Paste plain text or [mm:ss.xx] timestamped LRC lyrics:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xAAFFFFFF)
-                    )
-                    OutlinedTextField(
-                        value = pastedLyricsInput,
-                        onValueChange = { pastedLyricsInput = it },
-                        placeholder = {
-                            Text(
-                                text = "[00:12.00] Line one...\n[00:16.50] Line two...",
-                                color = Color(0x66FFFFFF)
-                            )
-                        },
-                        minLines = 6,
-                        maxLines = 12,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = primaryColor,
-                            unfocusedBorderColor = Color(0x55FFFFFF),
-                            cursorColor = primaryColor
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("paste_lyrics_input")
-                    )
-                }
+            onPickFile = {
+                lrcFilePickerLauncher.launch(arrayOf("*/*"))
             },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (pastedLyricsInput.isNotBlank()) {
-                            onSavePastedLyrics(pastedLyricsInput)
-                        }
-                        showPasteDialog = false
-                    },
-                    enabled = pastedLyricsInput.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = primaryColor,
-                        contentColor = Color(0xFF0C0E1A)
-                    ),
-                    modifier = Modifier.testTag("save_pasted_lyrics_button")
-                ) {
-                    Text("Save Lyrics", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showPasteDialog = false }) {
-                    Text("Cancel", color = Color(0xCCFFFFFF))
-                }
-            },
-            containerColor = Color(0xFF16182B),
-            shape = OneUISquircleLarge
+            onClearLyrics = onClearLyrics
         )
     }
 }

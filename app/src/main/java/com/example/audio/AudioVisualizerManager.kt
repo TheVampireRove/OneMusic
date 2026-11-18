@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.audiofx.Visualizer
+import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +34,7 @@ import kotlin.math.sin
  * and falls back smoothly to an idle or gentle beat-reactive wave when permission is denied,
  * playback is paused, or hardware Visualizer initialization is unavailable.
  */
+@OptIn(UnstableApi::class)
 class AudioVisualizerManager(
     private val scope: CoroutineScope,
     private val contextProvider: () -> Context?

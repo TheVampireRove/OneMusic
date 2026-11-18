@@ -505,4 +505,111 @@ class ExampleRobolectricTest {
     assertEquals(2, updated.discNumber)
   }
 
+  @Test
+  fun `new visualizer styles and lyrics animation settings persist cleanly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val expectedStyles = listOf(
+      com.example.model.VisualizerStyle.KALEIDOSCOPE_MANDALA,
+      com.example.model.VisualizerStyle.DNA_DOUBLE_HELIX,
+      com.example.model.VisualizerStyle.FIREFLY_SWARM,
+      com.example.model.VisualizerStyle.GALAXY_SUPERNOVA,
+      com.example.model.VisualizerStyle.OSCILLOSCOPE_LISSAJOUS,
+      com.example.model.VisualizerStyle.CASSETTE_TAPE
+    )
+    org.junit.Assert.assertTrue(com.example.model.VisualizerStyle.entries.containsAll(expectedStyles))
+    assertEquals(6, com.example.model.LyricsAnimationStyle.entries.size)
+    assertEquals(3, com.example.model.LyricsAnimationSpeed.entries.size)
+
+    val customSettings = com.example.model.AppSettings(
+      visualizerStyle = com.example.model.VisualizerStyle.KALEIDOSCOPE_MANDALA,
+      lyricsAnimationStyle = com.example.model.LyricsAnimationStyle.KARAOKE_SWEEP,
+      lyricsAnimationSpeed = com.example.model.LyricsAnimationSpeed.SNAPPY,
+      lyricsGlowEnabled = false
+    )
+    com.example.data.AppSettingsCache.saveSettings(context, customSettings)
+    val loaded = com.example.data.AppSettingsCache.loadSettings(context)
+
+    assertEquals(com.example.model.VisualizerStyle.KALEIDOSCOPE_MANDALA, loaded.visualizerStyle)
+    assertEquals(com.example.model.LyricsAnimationStyle.KARAOKE_SWEEP, loaded.lyricsAnimationStyle)
+    assertEquals(com.example.model.LyricsAnimationSpeed.SNAPPY, loaded.lyricsAnimationSpeed)
+    org.junit.Assert.assertFalse(loaded.lyricsGlowEnabled)
+  }
+
+  @Test
+  fun `lyrics repository parses enhanced word-synced lrc, inline brackets, shifts offsets, replaces, and clears`() = kotlinx.coroutines.test.runTest {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.data.LyricsRepository.clearCachedLyrics(context, "word_sync_test_1")
+
+    val track = com.example.model.Track(
+      id = "word_sync_test_1",
+      title = "Word Sync Song",
+      artist = "Artist",
+      album = "Album",
+      durationMs = 180_000L,
+      primaryColor = androidx.compose.ui.graphics.Color.Cyan,
+      secondaryColor = androidx.compose.ui.graphics.Color.Blue,
+      accentColor = androidx.compose.ui.graphics.Color.White,
+      genre = "Pop",
+      coverType = com.example.model.CoverArtType.NEON,
+      lyrics = emptyList(),
+      isLocalFile = true
+    )
+
+    // 1. Enhanced LRC `<mm:ss.xx>` word sync + trailing end timestamp + repeated chorus line
+    val enhancedLrc = """
+      [00:10.00]<00:10.00>Hello <00:10.50>bright <00:11.10>world<00:11.80>
+      [00:15.00][00:45.00]<00:15.00>Chorus <00:15.60>line<00:16.20>
+    """.trimIndent()
+    val parsedEnhanced = com.example.data.LyricsRepository.parseLyricsContent(enhancedLrc, track.durationMs)
+    assertEquals(3, parsedEnhanced.size)
+    assertEquals(10_000L, parsedEnhanced[0].timeMs)
+    assertEquals("Hello bright world", parsedEnhanced[0].text)
+    assertEquals(3, parsedEnhanced[0].words.size)
+    assertEquals("Hello ", parsedEnhanced[0].words[0].text)
+    assertEquals(10_000L, parsedEnhanced[0].words[0].timeMs)
+    assertEquals(10_500L, parsedEnhanced[0].words[0].endTimeMs)
+    assertEquals("world", parsedEnhanced[0].words[2].text)
+    assertEquals(11_100L, parsedEnhanced[0].words[2].timeMs)
+    assertEquals(11_800L, parsedEnhanced[0].words[2].endTimeMs)
+
+    // Second repeated chorus occurrence shifts word timestamps by +30_000ms
+    assertEquals(45_000L, parsedEnhanced[2].timeMs)
+    assertEquals(45_000L, parsedEnhanced[2].words[0].timeMs)
+    assertEquals(45_600L, parsedEnhanced[2].words[1].timeMs)
+    assertEquals(46_200L, parsedEnhanced[2].words[1].endTimeMs)
+
+    // 2. Inline `[mm:ss.xx]word` format without `<...>` tags vs repeated chorus `[00:05.00][00:35.00]Same`
+    val inlineAndChorus = """
+      [00:02.00]One [00:02.40]two [00:02.90]three [00:03.40]
+      [00:05.00][00:35.00]Repeated line
+    """.trimIndent()
+    val parsedInline = com.example.data.LyricsRepository.parseLyricsContent(inlineAndChorus, track.durationMs)
+    assertEquals(3, parsedInline.size)
+    assertEquals("One two three", parsedInline[0].text)
+    assertEquals(3, parsedInline[0].words.size)
+    assertEquals(2_000L, parsedInline[0].words[0].timeMs)
+    assertEquals(2_400L, parsedInline[0].words[1].timeMs)
+    assertEquals(3_400L, parsedInline[0].words[2].endTimeMs)
+    assertEquals("Repeated line", parsedInline[1].text)
+    assertEquals(0, parsedInline[1].words.size)
+    assertEquals(35_000L, parsedInline[2].timeMs)
+
+    // 3. Offset shifting updates both line and word timestamps
+    val shifted = com.example.data.LyricsRepository.shiftLrcTimestamps("[00:10.00]<00:10.00>Hi <00:10.50>there", 500L)
+    assertEquals("[00:10.50]<00:10.50>Hi <00:11.00>there", shifted)
+
+    // 4. Saving wrong lyrics, retrieving editable raw text, replacing with word-synced lyrics, then clearing
+    com.example.data.LyricsRepository.saveManualLyrics(context, track, "[00:01.00]Wrong old lyrics")
+    assertEquals("[00:01.00]Wrong old lyrics", com.example.data.LyricsRepository.getEditableRawLyrics(context, track))
+
+    val replaced = com.example.data.LyricsRepository.saveManualLyrics(context, track, enhancedLrc)
+    assertEquals(3, replaced.size)
+    assertEquals(enhancedLrc, com.example.data.LyricsRepository.getEditableRawLyrics(context, track))
+    assertEquals(com.example.data.LyricsFetchStatus.FOUND, com.example.data.LyricsRepository.getTrackStatus(context, track.id))
+
+    com.example.data.LyricsRepository.clearCachedLyrics(context, track.id)
+    assertEquals(com.example.data.LyricsFetchStatus.NOT_FETCHED, com.example.data.LyricsRepository.getTrackStatus(context, track.id))
+    assertEquals("", com.example.data.LyricsRepository.getEditableRawLyrics(context, track))
+  }
+
 }

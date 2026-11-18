@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -53,11 +55,12 @@ fun MiniPlayer(
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 6.dp)
             .testTag("mini_player")
+            .shadow(12.dp, OneUIPillShape, clip = false)
+            .background(Color(0xFA16182B), OneUIPillShape)
             .glassmorphism(
                 shape = OneUIPillShape,
-                backgroundColor = Color(0x601A1C30),
-                borderWidth = 1.2.dp,
-                elevation = 10.dp
+                backgroundColor = Color(0xCC222540),
+                borderWidth = 1.2.dp
             )
             .clickable(onClick = onExpand)
     ) {

@@ -38,7 +38,10 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.model.VisualizerStyle
+import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -964,6 +967,462 @@ fun AudioVisualizer(
                         radius = 4.dp.toPx(),
                         center = pivot
                     )
+                }
+            }
+
+            VisualizerStyle.KALEIDOSCOPE_MANDALA -> {
+                var mandalaPhase by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlaying) {
+                    if (isPlaying) {
+                        var last = withFrameNanos { it }
+                        while (true) {
+                            val now = withFrameNanos { it }
+                            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                            last = now
+                            mandalaPhase += dt * 1.15f
+                        }
+                    }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .heightIn(min = maxHeight)
+                ) {
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val maxRadius = min(size.width, size.height) * 0.45f
+                    val bass = if (isPlaying && amplitudes.isNotEmpty()) amplitudes.take(5).average().toFloat() else 0.14f
+                    val petals = 12
+
+                    // Pulsing ambient center glow
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(effectivePeak.copy(alpha = 0.35f + bass * 0.3f), Color.Transparent),
+                            center = center,
+                            radius = maxRadius * (0.95f + bass * 0.2f)
+                        ),
+                        radius = maxRadius * (0.95f + bass * 0.2f),
+                        center = center
+                    )
+
+                    // 3 concentric rotating geometric petal rings
+                    for (layer in 0 until 3) {
+                        val layerDirection = if (layer % 2 == 0) 1f else -1f
+                        val layerScale = 0.45f + layer * 0.26f
+                        val layerColor = when (layer) {
+                            0 -> effectivePeak
+                            1 -> effectiveBody
+                            else -> effectiveBase
+                        }
+                        val path = Path()
+                        for (i in 0 until petals) {
+                            val amp = if (isPlaying && amplitudes.isNotEmpty()) {
+                                amplitudes[(i + layer * 4) % amplitudes.size].coerceIn(0.12f, 1f)
+                            } else 0.18f
+                            val angle = (i.toFloat() / petals) * (2f * PI.toFloat()) + mandalaPhase * layerDirection * (0.7f + layer * 0.2f)
+                            val nextAngle = ((i + 0.5f) / petals) * (2f * PI.toFloat()) + mandalaPhase * layerDirection * (0.7f + layer * 0.2f)
+                            val rOuter = maxRadius * layerScale * (0.68f + amp * 0.46f)
+                            val rInner = maxRadius * layerScale * 0.42f
+
+                            val ox = center.x + cos(angle) * rOuter
+                            val oy = center.y + sin(angle) * rOuter
+                            val ix = center.x + cos(nextAngle) * rInner
+                            val iy = center.y + sin(nextAngle) * rInner
+                            if (i == 0) path.moveTo(ox, oy) else path.lineTo(ox, oy)
+                            path.lineTo(ix, iy)
+                        }
+                        path.close()
+                        drawPath(
+                            path = path,
+                            color = layerColor.copy(alpha = 0.22f + bass * 0.22f)
+                        )
+                        drawPath(
+                            path = path,
+                            color = layerColor.copy(alpha = 0.85f),
+                            style = Stroke(width = (2.4f - layer * 0.4f).dp.toPx(), join = StrokeJoin.Round)
+                        )
+                    }
+
+                    // Center jewel core
+                    drawCircle(
+                        brush = Brush.radialGradient(listOf(Color.White, effectivePeak, effectiveBody)),
+                        radius = (8.dp.toPx() + bass * 10.dp.toPx()).coerceAtLeast(6f),
+                        center = center
+                    )
+                }
+            }
+
+            VisualizerStyle.DNA_DOUBLE_HELIX -> {
+                var helixPhase by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlaying) {
+                    if (isPlaying) {
+                        var last = withFrameNanos { it }
+                        while (true) {
+                            val now = withFrameNanos { it }
+                            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                            last = now
+                            helixPhase += dt * 3.1f
+                        }
+                    }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .heightIn(min = maxHeight)
+                ) {
+                    val midY = size.height / 2f
+                    val nodes = 22
+                    val stepX = size.width / (nodes + 1)
+                    val maxAmpPx = size.height * 0.36f
+
+                    val strandAPoints = mutableListOf<Offset>()
+                    val strandBPoints = mutableListOf<Offset>()
+
+                    for (i in 0 until nodes) {
+                        val amp = if (isPlaying && amplitudes.isNotEmpty()) {
+                            amplitudes[i % amplitudes.size].coerceIn(0.14f, 1f)
+                        } else 0.18f
+                        val x = (i + 1) * stepX
+                        val angle = i * 0.42f + helixPhase
+                        val yWave = sin(angle) * maxAmpPx * (0.45f + amp * 0.65f)
+                        val depthCos = cos(angle)
+
+                        val pA = Offset(x, midY + yWave)
+                        val pB = Offset(x, midY - yWave)
+                        strandAPoints.add(pA)
+                        strandBPoints.add(pB)
+
+                        // Connecting base-pair rung with depth alpha
+                        drawLine(
+                            brush = Brush.verticalGradient(listOf(effectivePeak, effectiveBase), startY = min(pA.y, pB.y), endY = max(pA.y, pB.y)),
+                            start = pA,
+                            end = pB,
+                            strokeWidth = (1.6f + amp * 1.4f).dp.toPx(),
+                            alpha = 0.25f + abs(depthCos) * 0.45f,
+                            cap = StrokeCap.Round
+                        )
+                    }
+
+                    // Draw connected double helix backbone curves
+                    val pathA = Path()
+                    val pathB = Path()
+                    strandAPoints.forEachIndexed { idx, pt ->
+                        if (idx == 0) pathA.moveTo(pt.x, pt.y) else pathA.lineTo(pt.x, pt.y)
+                    }
+                    strandBPoints.forEachIndexed { idx, pt ->
+                        if (idx == 0) pathB.moveTo(pt.x, pt.y) else pathB.lineTo(pt.x, pt.y)
+                    }
+                    drawPath(pathA, color = effectivePeak.copy(alpha = 0.85f), style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round))
+                    drawPath(pathB, color = effectiveBase.copy(alpha = 0.85f), style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round))
+
+                    // Draw 3D-scaled nucleotide orbs
+                    for (i in 0 until nodes) {
+                        val angle = i * 0.42f + helixPhase
+                        val depthCos = cos(angle)
+                        val amp = if (isPlaying && amplitudes.isNotEmpty()) amplitudes[i % amplitudes.size] else 0.18f
+                        val radiusA = (4.dp.toPx() + depthCos * 2.dp.toPx() + amp * 3.dp.toPx()).coerceAtLeast(2.5f)
+                        val radiusB = (4.dp.toPx() - depthCos * 2.dp.toPx() + amp * 3.dp.toPx()).coerceAtLeast(2.5f)
+                        drawCircle(color = effectivePeak, radius = radiusA, center = strandAPoints[i])
+                        drawCircle(color = effectiveBase, radius = radiusB, center = strandBPoints[i])
+                    }
+                }
+            }
+
+            VisualizerStyle.FIREFLY_SWARM -> {
+                var swarmPhase by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlaying) {
+                    if (isPlaying) {
+                        var last = withFrameNanos { it }
+                        while (true) {
+                            val now = withFrameNanos { it }
+                            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                            last = now
+                            swarmPhase += dt * 1.6f
+                        }
+                    }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .heightIn(min = maxHeight)
+                ) {
+                    val count = 26
+                    val cx = size.width / 2f
+                    val cy = size.height / 2f
+
+                    for (i in 0 until count) {
+                        val amp = if (isPlaying && amplitudes.isNotEmpty()) {
+                            amplitudes[i % amplitudes.size].coerceIn(0.12f, 1f)
+                        } else 0.15f
+                        val seed = i * 1.37f
+                        val px = cx + sin(swarmPhase * (0.7f + (i % 5) * 0.15f) + seed) * (size.width * 0.42f)
+                        val py = cy + cos(swarmPhase * (0.9f + (i % 4) * 0.18f) + seed * 1.7f) * (size.height * 0.36f)
+                        val trailX = cx + sin((swarmPhase - 0.12f) * (0.7f + (i % 5) * 0.15f) + seed) * (size.width * 0.42f)
+                        val trailY = cy + cos((swarmPhase - 0.12f) * (0.9f + (i % 4) * 0.18f) + seed * 1.7f) * (size.height * 0.36f)
+
+                        val glowCol = when (i % 3) {
+                            0 -> effectivePeak
+                            1 -> effectiveBody
+                            else -> effectiveBase
+                        }
+                        val orbRadius = (3.5.dp.toPx() + amp * 6.5.dp.toPx())
+
+                        // Soft motion trail
+                        drawLine(
+                            color = glowCol.copy(alpha = 0.45f),
+                            start = Offset(trailX, trailY),
+                            end = Offset(px, py),
+                            strokeWidth = orbRadius * 0.7f,
+                            cap = StrokeCap.Round
+                        )
+                        // Halo glow
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(glowCol.copy(alpha = 0.65f), Color.Transparent),
+                                center = Offset(px, py),
+                                radius = orbRadius * 2.8f
+                            ),
+                            radius = orbRadius * 2.8f,
+                            center = Offset(px, py)
+                        )
+                        // Bright firefly core
+                        drawCircle(
+                            color = Color.White.copy(alpha = 0.75f + amp * 0.25f),
+                            radius = orbRadius * 0.55f,
+                            center = Offset(px, py)
+                        )
+                    }
+                }
+            }
+
+            VisualizerStyle.GALAXY_SUPERNOVA -> {
+                var cosmosPhase by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlaying) {
+                    if (isPlaying) {
+                        var last = withFrameNanos { it }
+                        while (true) {
+                            val now = withFrameNanos { it }
+                            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                            last = now
+                            cosmosPhase += dt * 1.4f
+                        }
+                    }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .heightIn(min = maxHeight)
+                ) {
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val maxR = min(size.width, size.height) * 0.46f
+                    val bass = if (isPlaying && amplitudes.isNotEmpty()) amplitudes.take(6).average().toFloat() else 0.14f
+
+                    // Nebula core bloom
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0.7f),
+                                effectivePeak.copy(alpha = 0.45f + bass * 0.35f),
+                                effectiveBase.copy(alpha = 0.18f),
+                                Color.Transparent
+                            ),
+                            center = center,
+                            radius = maxR * (0.65f + bass * 0.35f)
+                        ),
+                        radius = maxR * (0.65f + bass * 0.35f),
+                        center = center
+                    )
+
+                    // 4 spiral nebula arms + reactive star rays
+                    val starCount = 48
+                    val goldenAngle = 2.39996f
+                    for (i in 0 until starCount) {
+                        val amp = if (isPlaying && amplitudes.isNotEmpty()) {
+                            amplitudes[i % amplitudes.size].coerceIn(0.1f, 1f)
+                        } else 0.15f
+                        val armAngle = i * goldenAngle + cosmosPhase * (0.45f + (1f - i.toFloat() / starCount) * 0.5f)
+                        val radialDist = maxR * ((i + 3).toFloat() / starCount) * (0.72f + amp * 0.38f)
+                        val sx = center.x + cos(armAngle) * radialDist
+                        val sy = center.y + sin(armAngle) * radialDist
+                        val starSize = (2.dp.toPx() + amp * 4.dp.toPx())
+                        val starColor = if (i % 2 == 0) effectivePeak else effectiveBody
+
+                        drawCircle(
+                            color = starColor.copy(alpha = 0.75f),
+                            radius = starSize,
+                            center = Offset(sx, sy)
+                        )
+                        if (amp > 0.55f) {
+                            drawLine(
+                                color = Color.White.copy(alpha = 0.35f),
+                                start = center,
+                                end = Offset(sx, sy),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+                    }
+                }
+            }
+
+            VisualizerStyle.OSCILLOSCOPE_LISSAJOUS -> {
+                var scopePhase by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlaying) {
+                    if (isPlaying) {
+                        var last = withFrameNanos { it }
+                        while (true) {
+                            val now = withFrameNanos { it }
+                            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                            last = now
+                            scopePhase += dt * 2.2f
+                        }
+                    }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .heightIn(min = maxHeight)
+                ) {
+                    val cx = size.width / 2f
+                    val cy = size.height / 2f
+                    val rx = size.width * 0.42f
+                    val ry = size.height * 0.40f
+                    val bass = if (isPlaying && amplitudes.isNotEmpty()) amplitudes.take(6).average().toFloat() else 0.18f
+                    val treble = if (isPlaying && amplitudes.size >= 16) amplitudes.drop(16).average().toFloat() else 0.18f
+
+                    // Subtle CRT reticle grid
+                    drawLine(Color(0x18FFFFFF), Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 1.dp.toPx())
+                    drawLine(Color(0x18FFFFFF), Offset(0f, cy), Offset(size.width, cy), strokeWidth = 1.dp.toPx())
+
+                    val steps = 140
+                    val primaryPath = Path()
+                    val harmonicPath = Path()
+                    for (i in 0..steps) {
+                        val t = (i.toFloat() / steps) * (2f * PI.toFloat())
+                        val band = if (isPlaying && amplitudes.isNotEmpty()) amplitudes[i % amplitudes.size] else 0.15f
+                        val x1 = cx + sin(3f * t + scopePhase) * rx * (0.55f + bass * 0.45f)
+                        val y1 = cy + sin(4f * t + band * 0.6f) * ry * (0.55f + treble * 0.45f)
+                        val x2 = cx + sin(2f * t - scopePhase * 0.7f) * rx * 0.72f
+                        val y2 = cy + cos(5f * t + scopePhase * 0.5f) * ry * 0.68f
+                        if (i == 0) {
+                            primaryPath.moveTo(x1, y1)
+                            harmonicPath.moveTo(x2, y2)
+                        } else {
+                            primaryPath.lineTo(x1, y1)
+                            harmonicPath.lineTo(x2, y2)
+                        }
+                    }
+
+                    // Phosphor outer bloom + crisp trace
+                    drawPath(harmonicPath, color = effectiveBase.copy(alpha = 0.45f), style = Stroke(width = 3.dp.toPx(), join = StrokeJoin.Round))
+                    drawPath(primaryPath, color = effectivePeak.copy(alpha = 0.30f), style = Stroke(width = 7.dp.toPx(), join = StrokeJoin.Round))
+                    drawPath(primaryPath, color = effectivePeak, style = Stroke(width = 2.4.dp.toPx(), join = StrokeJoin.Round))
+                }
+            }
+
+            VisualizerStyle.CASSETTE_TAPE -> {
+                var reelAngle by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(isPlaying) {
+                    if (isPlaying) {
+                        var last = withFrameNanos { it }
+                        while (true) {
+                            val now = withFrameNanos { it }
+                            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                            last = now
+                            reelAngle = (reelAngle + dt * 135f) % 360f
+                        }
+                    }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .heightIn(min = maxHeight)
+                ) {
+                    val cardW = min(size.width * 0.88f, size.height * 1.65f)
+                    val cardH = min(size.height * 0.86f, cardW * 0.62f)
+                    val left = (size.width - cardW) / 2f
+                    val top = (size.height - cardH) / 2f
+                    val bass = if (isPlaying && amplitudes.isNotEmpty()) amplitudes.take(6).average().toFloat() else 0.15f
+
+                    // Cassette shell
+                    drawRoundRect(
+                        color = Color(0xFF1A1D32),
+                        topLeft = Offset(left, top),
+                        size = Size(cardW, cardH),
+                        cornerRadius = CornerRadius(14.dp.toPx(), 14.dp.toPx())
+                    )
+                    drawRoundRect(
+                        color = effectivePeak.copy(alpha = 0.6f),
+                        topLeft = Offset(left, top),
+                        size = Size(cardW, cardH),
+                        cornerRadius = CornerRadius(14.dp.toPx(), 14.dp.toPx()),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+
+                    // Label stripe across top
+                    drawRoundRect(
+                        brush = Brush.horizontalGradient(listOf(effectiveBase, effectiveBody, effectivePeak)),
+                        topLeft = Offset(left + cardW * 0.08f, top + cardH * 0.12f),
+                        size = Size(cardW * 0.84f, cardH * 0.22f),
+                        cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
+                        alpha = 0.85f
+                    )
+
+                    // Tape window & spinning dual reels
+                    val winLeft = left + cardW * 0.16f
+                    val winTop = top + cardH * 0.40f
+                    val winW = cardW * 0.68f
+                    val winH = cardH * 0.34f
+                    drawRoundRect(
+                        color = Color(0xFF0C0D18),
+                        topLeft = Offset(winLeft, winTop),
+                        size = Size(winW, winH),
+                        cornerRadius = CornerRadius(8.dp.toPx(), 8.dp.toPx())
+                    )
+
+                    val reelY = winTop + winH / 2f
+                    val leftReelCenter = Offset(left + cardW * 0.32f, reelY)
+                    val rightReelCenter = Offset(left + cardW * 0.68f, reelY)
+                    val reelRadius = (winH * 0.40f).coerceAtLeast(10f)
+
+                    listOf(leftReelCenter, rightReelCenter).forEach { reelCenter ->
+                        drawCircle(color = effectiveBody.copy(alpha = 0.28f), radius = reelRadius * (1.25f + bass * 0.15f), center = reelCenter)
+                        rotate(degrees = reelAngle, pivot = reelCenter) {
+                            drawCircle(color = Color(0xFFE6EAF8), radius = reelRadius, center = reelCenter, style = Stroke(width = 2.dp.toPx()))
+                            for (spoke in 0 until 6) {
+                                val a = spoke * (PI.toFloat() / 3f)
+                                drawLine(
+                                    color = effectivePeak,
+                                    start = Offset(reelCenter.x + cos(a) * reelRadius * 0.32f, reelCenter.y + sin(a) * reelRadius * 0.32f),
+                                    end = Offset(reelCenter.x + cos(a) * reelRadius * 0.92f, reelCenter.y + sin(a) * reelRadius * 0.92f),
+                                    strokeWidth = 2.dp.toPx(),
+                                    cap = StrokeCap.Round
+                                )
+                            }
+                        }
+                        drawCircle(color = Color(0xFF0C0D18), radius = reelRadius * 0.3f, center = reelCenter)
+                    }
+
+                    // Live reactive VU meter bar across cassette bottom
+                    val vuCount = 12
+                    val vuBarW = (winW / vuCount) * 0.65f
+                    val vuGap = (winW / vuCount) * 0.35f
+                    val vuBaseY = top + cardH * 0.90f
+                    for (b in 0 until vuCount) {
+                        val amp = if (isPlaying && amplitudes.isNotEmpty()) amplitudes[(b * 2) % amplitudes.size].coerceIn(0.1f, 1f) else 0.12f
+                        val barH = (cardH * 0.11f) * amp
+                        val bx = winLeft + b * (vuBarW + vuGap)
+                        drawRoundRect(
+                            color = if (amp > 0.72f) effectivePeak else effectiveBody,
+                            topLeft = Offset(bx, vuBaseY - barH),
+                            size = Size(vuBarW, barH),
+                            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                        )
+                    }
                 }
             }
         }
