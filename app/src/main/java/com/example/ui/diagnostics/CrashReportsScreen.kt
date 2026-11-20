@@ -5,7 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -100,16 +102,20 @@ fun CrashReportsScreen(
         refreshReports()
     }
 
-    BackHandler {
-        if (selectedReport != null) {
-            selectedReport = null
-        } else {
-            onBack()
-        }
+    PredictiveBackHandler(enabled = true) { progress ->
+        try {
+            progress.collect { }
+            if (selectedReport != null) {
+                selectedReport = null
+            } else {
+                onBack()
+            }
+        } catch (_: kotlin.coroutines.cancellation.CancellationException) {}
     }
 
     Scaffold(
         containerColor = Color(0xFF0F101E),
+        contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
                 title = {

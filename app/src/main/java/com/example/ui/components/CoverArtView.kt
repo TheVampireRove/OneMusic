@@ -2,11 +2,14 @@ package com.example.ui.components
 
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -16,32 +19,31 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.Image
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import com.example.data.AlbumArtCache
 import com.example.model.CoverArtType
 import com.example.model.Track
-import com.example.ui.theme.OneUISquircleLarge
-import com.example.ui.theme.OneUISquircleSmall
+import com.example.ui.theme.MotionSpecs
+import com.example.ui.theme.appSharedElement
 
 @Composable
 fun CoverArtView(
@@ -50,7 +52,14 @@ fun CoverArtView(
     size: Dp = 56.dp,
     isPlaying: Boolean = false,
     showVinylPeek: Boolean = false,
-    cornerRadius: Dp = 16.dp
+    cornerRadius: Dp = 16.dp,
+    enableAnimatedCover: Boolean = false,
+    autoFetchWifiOnly: Boolean = true,
+    simulateMotionOnStaticCovers: Boolean = true,
+    animatePlaybackScale: Boolean = false,
+    artSharedElementKey: Any? = null,
+    onClick: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var loadedBitmap by remember(track.id, track.albumArtKey, track.albumArtUri) {
@@ -58,7 +67,7 @@ fun CoverArtView(
     }
 
     LaunchedEffect(track.id, track.albumArtKey, track.albumArtUri) {
-        if (loadedBitmap == null && (track.albumArtKey != null || track.albumArtUri != null)) {
+        if (!enableAnimatedCover && loadedBitmap == null && (track.albumArtKey != null || track.albumArtUri != null)) {
             val bmp = AlbumArtCache.loadArtwork(context, track.albumArtUri, track.albumArtKey)
             if (bmp != null) {
                 loadedBitmap = bmp
@@ -77,22 +86,46 @@ fun CoverArtView(
         label = "vinyl_rotate"
     )
 
+    val playbackScale by animateFloatAsState(
+        targetValue = if (!animatePlaybackScale || isPlaying) 1.0f else 0.92f,
+        animationSpec = MotionSpecs.ExpressiveSpring,
+        label = "cover_playback_scale"
+    )
+    val dynamicElevation by animateDpAsState(
+        targetValue = when {
+            !animatePlaybackScale -> 12.dp
+            isPlaying -> 24.dp
+            else -> 8.dp
+        },
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "cover_playback_elevation"
+    )
+
     val shape = RoundedCornerShape(cornerRadius)
 
     Box(
-        modifier = modifier.size(size),
+        modifier = modifier
+            .size(size)
+            .graphicsLayer {
+                if (animatePlaybackScale) {
+                    scaleX = playbackScale
+                    scaleY = playbackScale
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
-        // Optional Vinyl Disc peeking behind cover
+        // Optional Vinyl Disc peeking behind cover (GPU-accelerated rotation)
         if (showVinylPeek) {
             Box(
                 modifier = Modifier
                     .size(size * 0.92f)
                     .offset(x = size * 0.28f)
-                    .shadow(16.dp, CircleShape)
+                    .shadow(if (isPlaying) 18.dp else 10.dp, CircleShape)
                     .clip(CircleShape)
                     .background(Color(0xFF111116))
-                    .rotate(if (isPlaying) vinylAngle else 0f)
+                    .graphicsLayer {
+                        rotationZ = if (isPlaying) vinylAngle else 0f
+                    }
                     .border(1.dp, Color(0xFF333340), CircleShape)
             ) {
                 // Vinyl grooves
@@ -128,7 +161,22 @@ fun CoverArtView(
         Box(
             modifier = Modifier
                 .size(size)
-                .shadow(12.dp, shape, ambientColor = track.primaryColor, spotColor = track.accentColor)
+                .then(
+                    if (artSharedElementKey != null) {
+                        Modifier.appSharedElement(
+                            key = artSharedElementKey,
+                            clipShape = shape
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
+                .shadow(
+                    elevation = dynamicElevation,
+                    shape = shape,
+                    ambientColor = track.primaryColor.copy(alpha = if (isPlaying) 0.9f else 0.55f),
+                    spotColor = track.accentColor.copy(alpha = if (isPlaying) 0.9f else 0.5f)
+                )
                 .clip(shape)
                 .border(
                     1.dp,
@@ -138,19 +186,34 @@ fun CoverArtView(
                     shape
                 )
         ) {
-            val bitmap = loadedBitmap
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "${track.title} Album Art",
-                    contentScale = ContentScale.Crop,
+            if (enableAnimatedCover) {
+                AnimatedAlbumCover(
+                    track = track,
+                    size = size,
+                    cornerRadius = cornerRadius,
+                    isPlaying = isPlaying,
+                    enableAnimatedCovers = true,
+                    autoFetchWifiOnly = autoFetchWifiOnly,
+                    simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                    onClick = onClick,
+                    onLongPress = onLongPress,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                CoverArtCanvas(
-                    track = track,
-                    modifier = Modifier.fillMaxSize()
-                )
+                val bitmap = loadedBitmap
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "${track.title} Album Art",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    CoverArtCanvas(
+                        track = track,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
     }

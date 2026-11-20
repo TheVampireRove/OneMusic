@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -61,6 +62,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentPaste
@@ -113,6 +115,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import com.example.data.AnimatedArtRepository
+import com.example.data.AnimatedCoverMedia
 import com.example.data.LyricsRepository
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
@@ -137,9 +142,11 @@ import com.example.model.LyricsAnimationStyle
 import com.example.model.RepeatMode
 import com.example.model.Track
 import com.example.model.VisualizerStyle
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
 import com.example.ui.theme.OneUISquircleMedium
+import com.example.ui.theme.appSharedBounds
 import com.example.ui.theme.glassmorphism
 import com.example.ui.theme.parseHexColor
 import kotlin.math.PI
@@ -187,11 +194,20 @@ fun NowPlayingScreen(
     lyricsAnimationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
     lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
     lyricsGlowEnabled: Boolean = true,
+    displayMode: DisplayMode = DisplayMode.ARTWORK,
+    onDisplayModeChange: (DisplayMode) -> Unit = {},
+    enableAnimatedCovers: Boolean = true,
+    autoFetchAnimatedCoversWifiOnly: Boolean = true,
+    simulateMotionOnStaticCovers: Boolean = true,
+    onImportAnimatedCover: (Uri) -> Unit = {},
+    onRemoveCustomAnimatedCover: () -> Unit = {},
     onImportLyricsUri: (Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
     loadEditableLyrics: (suspend () -> String)? = null,
     onRefetchLyrics: (() -> Unit)? = null,
     onClearLyrics: (() -> Unit)? = null,
+    onOpenExternalLyricsEditor: ((LyricsEditorTab) -> Unit)? = null,
+    enableSharedPlayerTransition: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // Only intercept back swipe gesture if the player is collapsible (e.g. modal full-screen in handheld mode).
@@ -205,9 +221,27 @@ fun NowPlayingScreen(
         }
     }
 
-    var displayMode by remember { mutableStateOf(DisplayMode.ARTWORK) }
-    var isDraggingSlider by remember { mutableStateOf(false) }
-    var sliderDragPosition by remember { mutableFloatStateOf(0f) }
+    val context = LocalContext.current
+    var localDisplayMode by remember { mutableStateOf(displayMode) }
+    LaunchedEffect(displayMode) {
+        localDisplayMode = displayMode
+    }
+    val updateDisplayMode: (DisplayMode) -> Unit = { newMode ->
+        localDisplayMode = newMode
+        onDisplayModeChange(newMode)
+    }
+
+    var showAnimatedCoverDialog by remember { mutableStateOf(false) }
+    val animatedCoverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportAnimatedCover(uri)
+        }
+    }
+
+    var isDraggingSlider by remember(track.id) { mutableStateOf(false) }
+    var sliderDragPosition by remember(track.id) { mutableFloatStateOf(0f) }
 
     val activePositionMs = if (isDraggingSlider) {
         (sliderDragPosition * track.durationMs).toLong()
@@ -215,14 +249,62 @@ fun NowPlayingScreen(
         currentPositionMs
     }
 
-    // Dynamic animated colors
-    val animatedPrimary by animateColorAsState(track.primaryColor, label = "bg_primary")
-    val animatedSecondary by animateColorAsState(track.secondaryColor, label = "bg_secondary")
-    val animatedAccent by animateColorAsState(track.accentColor, label = "bg_accent")
+    // Dynamic animated colors with ExpressiveSpring physics
+    val animatedPrimary by animateColorAsState(
+        targetValue = track.primaryColor,
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "bg_primary"
+    )
+    val animatedSecondary by animateColorAsState(
+        targetValue = track.secondaryColor,
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "bg_secondary"
+    )
+    val animatedAccent by animateColorAsState(
+        targetValue = track.accentColor,
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "bg_accent"
+    )
+
+    val lyricsController = rememberLyricsStudioController(
+        track = track,
+        currentPositionMs = activePositionMs,
+        accentColor = animatedAccent,
+        onImportLyricsUri = onImportLyricsUri,
+        onSavePastedLyrics = onSavePastedLyrics,
+        loadEditableLyrics = loadEditableLyrics,
+        onClearLyrics = onClearLyrics,
+        onOpenExternalEditor = onOpenExternalLyricsEditor
+    )
+
+    val animatedArtCacheVersion by AnimatedArtRepository.cacheVersion.collectAsStateWithLifecycle()
+
+    if (showAnimatedCoverDialog) {
+        val hasCustom = remember(track.id, track.artist, track.album, track.title, animatedArtCacheVersion) {
+            AnimatedArtRepository.getCachedOrSidecarImmediate(context, track) != AnimatedCoverMedia.None
+        }
+        AnimatedCoverOptionsDialog(
+            track = track,
+            hasCustomCover = hasCustom,
+            accentColor = animatedAccent,
+            onDismiss = { showAnimatedCoverDialog = false },
+            onPickAnimatedFile = {
+                animatedCoverPickerLauncher.launch(
+                    arrayOf("video/mp4", "video/webm", "image/gif", "image/webp")
+                )
+            },
+            onRemoveCustomCover = onRemoveCustomAnimatedCover
+        )
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
+            .appSharedBounds(
+                key = "player_container",
+                enabled = enableSharedPlayerTransition,
+                clipShape = OneUISquircleLarge
+            )
             .background(Color(0xFF0F101C))
     ) {
         // Ambient background glow reflecting track colors
@@ -315,40 +397,58 @@ fun NowPlayingScreen(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 ModePillButton(
-                    selected = displayMode == DisplayMode.ARTWORK,
+                    selected = localDisplayMode == DisplayMode.ARTWORK,
                     title = "Artwork",
                     accentColor = animatedAccent,
-                    onClick = { displayMode = DisplayMode.ARTWORK }
+                    onClick = { updateDisplayMode(DisplayMode.ARTWORK) }
                 )
-                ModePillButton(
-                    selected = displayMode == DisplayMode.LYRICS,
-                    title = "Lyrics",
+                LyricsModePillWithDropdown(
+                    selected = localDisplayMode == DisplayMode.LYRICS,
+                    isLyricsVisible = localDisplayMode == DisplayMode.LYRICS || localDisplayMode == DisplayMode.SPLIT,
+                    controller = lyricsController,
                     accentColor = animatedAccent,
-                    onClick = { displayMode = DisplayMode.LYRICS }
+                    onClick = { updateDisplayMode(DisplayMode.LYRICS) },
+                    onEnsureLyricsMode = {
+                        if (localDisplayMode != DisplayMode.LYRICS && localDisplayMode != DisplayMode.SPLIT) {
+                            updateDisplayMode(DisplayMode.LYRICS)
+                        }
+                    },
+                    onRefetchOnline = onRefetchLyrics,
+                    onClearLyrics = onClearLyrics
                 )
                 VisualizerModePillWithDropdown(
-                    selected = displayMode == DisplayMode.VISUALIZER,
+                    selected = localDisplayMode == DisplayMode.VISUALIZER,
                     currentStyle = visualizerStyle,
                     accentColor = animatedAccent,
-                    onClick = { displayMode = DisplayMode.VISUALIZER },
+                    onClick = { updateDisplayMode(DisplayMode.VISUALIZER) },
                     onStyleSelected = { newStyle ->
-                        displayMode = DisplayMode.VISUALIZER
+                        updateDisplayMode(DisplayMode.VISUALIZER)
                         onVisualizerStyleChange(newStyle)
                     }
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Seamless Middle Visual (Artwork vs Lyrics vs Visualizer)
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
+                val maxAvailableArtHeight = (maxHeight - 12.dp).coerceAtLeast(100.dp)
                 AnimatedContent(
-                    targetState = displayMode,
+                    targetState = localDisplayMode,
+                    transitionSpec = {
+                        (fadeIn(animationSpec = MotionSpecs.snappySpring()) + scaleIn(
+                            initialScale = 0.96f,
+                            animationSpec = MotionSpecs.snappySpring()
+                        )) togetherWith (fadeOut(animationSpec = MotionSpecs.snappySpring()) + scaleOut(
+                            targetScale = 0.96f,
+                            animationSpec = MotionSpecs.snappySpring()
+                        ))
+                    },
                     label = "center_content_switch"
                 ) { mode ->
                     when (mode) {
@@ -382,12 +482,19 @@ fun NowPlayingScreen(
                                     AlbumArtSize.EXTRA_LARGE -> 330.dp
                                     AlbumArtSize.JUMBO -> 365.dp
                                 }
+                                val fittedArtSize = minOf(visualizerArtSizeDp, maxAvailableArtHeight)
                                 CoverArtView(
                                     track = track,
-                                    size = visualizerArtSizeDp,
-                                    cornerRadius = (visualizerArtSizeDp.value * 0.11f).dp,
+                                    size = fittedArtSize,
+                                    cornerRadius = (fittedArtSize.value * 0.11f).dp,
                                     isPlaying = isPlaying,
-                                    showVinylPeek = true,
+                                    showVinylPeek = maxAvailableArtHeight >= 150.dp,
+                                    animatePlaybackScale = true,
+                                    artSharedElementKey = if (enableSharedPlayerTransition) "player_artwork_${track.id}" else null,
+                                    enableAnimatedCover = enableAnimatedCovers,
+                                    autoFetchWifiOnly = autoFetchAnimatedCoversWifiOnly,
+                                    simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                                    onLongPress = { showAnimatedCoverDialog = true },
                                     modifier = Modifier.testTag("hero_cover_art")
                                 )
                             }
@@ -408,8 +515,8 @@ fun NowPlayingScreen(
                                 onImportLyricsUri = onImportLyricsUri,
                                 onSavePastedLyrics = onSavePastedLyrics,
                                 loadEditableLyrics = loadEditableLyrics,
-                                onRefetchLyrics = onRefetchLyrics,
-                                onClearLyrics = onClearLyrics
+                                onClearLyrics = onClearLyrics,
+                                studioController = lyricsController
                             )
                         }
                         DisplayMode.VISUALIZER -> {
@@ -472,12 +579,19 @@ fun NowPlayingScreen(
                                     modifier = Modifier.weight(1f),
                                     contentAlignment = Alignment.Center
                                 ) {
+                                    val splitArtSize = minOf(180.dp, maxAvailableArtHeight)
                                     CoverArtView(
                                         track = track,
-                                        size = 180.dp,
-                                        cornerRadius = 28.dp,
+                                        size = splitArtSize,
+                                        cornerRadius = (splitArtSize.value * 0.15f).dp,
                                         isPlaying = isPlaying,
                                         showVinylPeek = false,
+                                        animatePlaybackScale = true,
+                                        artSharedElementKey = if (enableSharedPlayerTransition) "player_artwork_${track.id}" else null,
+                                        enableAnimatedCover = enableAnimatedCovers,
+                                        autoFetchWifiOnly = autoFetchAnimatedCoversWifiOnly,
+                                        simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                                        onLongPress = { showAnimatedCoverDialog = true },
                                         modifier = Modifier.testTag("split_cover_art")
                                     )
                                 }
@@ -499,8 +613,8 @@ fun NowPlayingScreen(
                                         onImportLyricsUri = onImportLyricsUri,
                                         onSavePastedLyrics = onSavePastedLyrics,
                                         loadEditableLyrics = loadEditableLyrics,
-                                        onRefetchLyrics = onRefetchLyrics,
-                                        onClearLyrics = onClearLyrics
+                                        onClearLyrics = onClearLyrics,
+                                        studioController = lyricsController
                                     )
                                 }
                             }
@@ -525,7 +639,15 @@ fun NowPlayingScreen(
                         style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
                         color = Color.White,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .appSharedBounds(
+                                key = "player_title_${track.id}",
+                                enabled = enableSharedPlayerTransition,
+                                useScaleToBounds = true
+                            )
+                            .basicMarquee(iterations = Int.MAX_VALUE)
                     )
                     Spacer(modifier = Modifier.height(3.dp))
                     Text(
@@ -543,24 +665,33 @@ fun NowPlayingScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(46.dp)
+                            .size(48.dp)
                             .glassmorphism(shape = CircleShape, backgroundColor = Color(0x28FFFFFF))
                             .testTag("favorite_button"),
                         contentAlignment = Alignment.Center
                     ) {
-                        val scale by animateFloatAsState(
-                            targetValue = if (track.isFavorite) 1.15f else 1.0f,
-                            animationSpec = spring(dampingRatio = 0.5f),
+                        val favScale by animateFloatAsState(
+                            targetValue = if (track.isFavorite) 1.12f else 1.0f,
+                            animationSpec = MotionSpecs.TactilePressSpring,
                             label = "fav_scale"
                         )
-                        Icon(
-                            imageVector = if (track.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                            contentDescription = "Favorite",
-                            tint = if (track.isFavorite) Color(0xFFFF4081) else Color.White,
-                            modifier = Modifier
-                                .size(24.dp)
-                                .scale(scale)
-                        )
+                        AnimatedContent(
+                            targetState = track.isFavorite,
+                            transitionSpec = { MotionSpecs.iconMorphTransition() },
+                            label = "now_playing_fav_morph"
+                        ) { isFav ->
+                            Icon(
+                                imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = "Favorite",
+                                tint = if (isFav) Color(0xFFFF4081) else Color.White,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .graphicsLayer {
+                                        scaleX = favScale
+                                        scaleY = favScale
+                                    }
+                            )
+                        }
                     }
                 }
             }
@@ -671,11 +802,11 @@ fun NowPlayingScreen(
             }
 
             val springSpec = when (buttonAnimationEffect) {
-                ButtonAnimationEffect.BOUNCY_SPRING -> spring<Float>(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-                ButtonAnimationEffect.ROTATION_TILT -> spring<Float>(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow)
-                ButtonAnimationEffect.NEON_GLOW_POP -> spring<Float>(dampingRatio = Spring.DampingRatioHighBouncy, stiffness = Spring.StiffnessMediumLow)
-                ButtonAnimationEffect.JELLY_SQUISH -> spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessLow)
-                ButtonAnimationEffect.SUBTLE_HAPTIC -> spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium)
+                ButtonAnimationEffect.BOUNCY_SPRING -> MotionSpecs.TactilePressSpring
+                ButtonAnimationEffect.ROTATION_TILT -> MotionSpecs.ExpressiveSpring
+                ButtonAnimationEffect.NEON_GLOW_POP -> spring<Float>(dampingRatio = 0.58f, stiffness = Spring.StiffnessMedium)
+                ButtonAnimationEffect.JELLY_SQUISH -> spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow)
+                ButtonAnimationEffect.SUBTLE_HAPTIC -> MotionSpecs.SnappySpring
             }
 
             val prevScaleX by animateFloatAsState(targetValue = prevTargetScaleX, animationSpec = springSpec, label = "prev_sx")
@@ -717,28 +848,39 @@ fun NowPlayingScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Shuffle button with blurred glass look
+                    // Shuffle button with blurred glass look & SnappySpring icon morph
                     OneUITooltipButton(
                         name = if (isShuffleActive) "Shuffle: Enabled" else "Shuffle: Disabled",
                         onClick = onToggleShuffle
                     ) {
+                        val shuffleBg by animateColorAsState(
+                            targetValue = if (isShuffleActive) animatedAccent.copy(alpha = 0.28f) else Color(0x20FFFFFF),
+                            animationSpec = MotionSpecs.snappySpring(),
+                            label = "shuffle_bg"
+                        )
                         Box(
                             modifier = Modifier
                                 .size(effectiveModeBtn)
                                 .glassmorphism(
                                     shape = CircleShape,
-                                    backgroundColor = if (isShuffleActive) animatedAccent.copy(alpha = 0.28f) else Color(0x20FFFFFF),
+                                    backgroundColor = shuffleBg,
                                     borderWidth = 1.dp
                                 )
                                 .testTag("shuffle_button"),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Shuffle,
-                                contentDescription = "Shuffle",
-                                tint = if (isShuffleActive) animatedAccent else Color(0x88FFFFFF),
-                                modifier = Modifier.size(effectiveModeIcon)
-                            )
+                            AnimatedContent(
+                                targetState = isShuffleActive,
+                                transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                label = "shuffle_icon_morph"
+                            ) { active ->
+                                Icon(
+                                    imageVector = Icons.Default.Shuffle,
+                                    contentDescription = "Shuffle",
+                                    tint = if (active) animatedAccent else Color(0x88FFFFFF),
+                                    modifier = Modifier.size(effectiveModeIcon)
+                                )
+                            }
                         }
                     }
 
@@ -793,10 +935,7 @@ fun NowPlayingScreen(
                         ) {
                             AnimatedContent(
                                 targetState = isPlaying,
-                                transitionSpec = {
-                                    (fadeIn(animationSpec = tween(180)) + scaleIn(initialScale = 0.82f)) togetherWith
-                                    (fadeOut(animationSpec = tween(180)) + scaleOut(targetScale = 0.82f))
-                                },
+                                transitionSpec = { MotionSpecs.iconMorphTransition() },
                                 label = "play_pause_icon_crossfade"
                             ) { playing ->
                                 Icon(
@@ -836,7 +975,7 @@ fun NowPlayingScreen(
                         }
                     }
 
-                    // Repeat button with blurred glass look
+                    // Repeat button with blurred glass look & SnappySpring icon morph
                     OneUITooltipButton(
                         name = when (repeatMode) {
                             RepeatMode.OFF -> "Repeat: Off"
@@ -845,23 +984,34 @@ fun NowPlayingScreen(
                         },
                         onClick = onCycleRepeat
                     ) {
+                        val repeatBg by animateColorAsState(
+                            targetValue = if (repeatMode != RepeatMode.OFF) animatedAccent.copy(alpha = 0.28f) else Color(0x20FFFFFF),
+                            animationSpec = MotionSpecs.snappySpring(),
+                            label = "repeat_bg"
+                        )
                         Box(
                             modifier = Modifier
                                 .size(effectiveModeBtn)
                                 .glassmorphism(
                                     shape = CircleShape,
-                                    backgroundColor = if (repeatMode != RepeatMode.OFF) animatedAccent.copy(alpha = 0.28f) else Color(0x20FFFFFF),
+                                    backgroundColor = repeatBg,
                                     borderWidth = 1.dp
                                 )
                                 .testTag("repeat_button"),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = if (repeatMode == RepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
-                                contentDescription = "Repeat",
-                                tint = if (repeatMode != RepeatMode.OFF) animatedAccent else Color(0x88FFFFFF),
-                                modifier = Modifier.size(effectiveModeIcon)
-                            )
+                            AnimatedContent(
+                                targetState = repeatMode,
+                                transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                label = "repeat_icon_morph"
+                            ) { mode ->
+                                Icon(
+                                    imageVector = if (mode == RepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                                    contentDescription = "Repeat",
+                                    tint = if (mode != RepeatMode.OFF) animatedAccent else Color(0x88FFFFFF),
+                                    modifier = Modifier.size(effectiveModeIcon)
+                                )
+                            }
                         }
                     }
                 }
@@ -877,6 +1027,11 @@ fun ModePillButton(
     accentColor: Color,
     onClick: () -> Unit
 ) {
+    val pillBg by animateColorAsState(
+        targetValue = if (selected) accentColor else Color.Transparent,
+        animationSpec = MotionSpecs.snappySpring(),
+        label = "mode_pill_bg"
+    )
     OneUITooltipButton(
         name = "$title View",
         onClick = onClick
@@ -884,7 +1039,7 @@ fun ModePillButton(
         Box(
             modifier = Modifier
                 .clip(OneUIPillShape)
-                .background(if (selected) accentColor else Color.Transparent)
+                .background(pillBg)
                 .padding(horizontal = 16.dp, vertical = 6.dp)
         ) {
             Text(
@@ -908,6 +1063,11 @@ fun VisualizerModePillWithDropdown(
     onStyleSelected: (VisualizerStyle) -> Unit
 ) {
     var isDropdownOpen by remember { mutableStateOf(false) }
+    val pillBg by animateColorAsState(
+        targetValue = if (selected) accentColor else Color.Transparent,
+        animationSpec = MotionSpecs.snappySpring(),
+        label = "visualizer_pill_bg"
+    )
 
     Box {
         OneUITooltipButton(
@@ -922,7 +1082,7 @@ fun VisualizerModePillWithDropdown(
             Box(
                 modifier = Modifier
                     .clip(OneUIPillShape)
-                    .background(if (selected) accentColor else Color.Transparent)
+                    .background(pillBg)
                     .padding(start = 14.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -1022,16 +1182,16 @@ fun LyricsView(
     onImportLyricsUri: (Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
     loadEditableLyrics: (suspend () -> String)? = null,
-    onRefetchLyrics: (() -> Unit)? = null,
-    onClearLyrics: (() -> Unit)? = null
+    onClearLyrics: (() -> Unit)? = null,
+    studioController: LyricsStudioController? = null
 ) {
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val coroutineScope = rememberCoroutineScope()
-    var showPasteDialog by remember { mutableStateOf(false) }
+    var showLocalDialog by remember { mutableStateOf(false) }
     var editorInitialTab by remember { mutableStateOf(LyricsEditorTab.PASTE_EDIT) }
     var pastedLyricsInput by remember { mutableStateOf("") }
 
-    val lrcFilePickerLauncher = rememberLauncherForActivityResult(
+    val localPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
@@ -1040,21 +1200,32 @@ fun LyricsView(
     }
 
     val isSyncedTrack = lyrics.any { it.isSynced }
-    val hasWordSync = remember(lyrics) { lyrics.any { it.words.isNotEmpty() } }
     val activeIndex = lyrics.indexOfLast { it.timeMs <= currentPositionMs }.coerceAtLeast(0)
     val speedMult = animationSpeed.durationMultiplier
 
     val openEditor: (LyricsEditorTab) -> Unit = { tab ->
-        editorInitialTab = tab
-        pastedLyricsInput = LyricsRepository.serializeLyricsToLrc(lyrics)
-        showPasteDialog = true
-        if (loadEditableLyrics != null) {
-            coroutineScope.launch {
-                val loaded = loadEditableLyrics.invoke()
-                if (loaded.isNotBlank()) {
-                    pastedLyricsInput = loaded
+        if (studioController != null) {
+            studioController.openEditor(tab)
+        } else {
+            editorInitialTab = tab
+            pastedLyricsInput = LyricsRepository.serializeLyricsToLrc(lyrics)
+            showLocalDialog = true
+            if (loadEditableLyrics != null) {
+                coroutineScope.launch {
+                    val loaded = loadEditableLyrics.invoke()
+                    if (loaded.isNotBlank()) {
+                        pastedLyricsInput = loaded
+                    }
                 }
             }
+        }
+    }
+
+    val launchFilePicker: () -> Unit = {
+        if (studioController != null) {
+            studioController.launchFilePicker()
+        } else {
+            localPickerLauncher.launch(arrayOf("*/*"))
         }
     }
 
@@ -1144,9 +1315,7 @@ fun LyricsView(
 
                     val importButton: @Composable (Modifier) -> Unit = { btnModifier ->
                         Button(
-                            onClick = {
-                                lrcFilePickerLauncher.launch(arrayOf("*/*"))
-                            },
+                            onClick = launchFilePicker,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = primaryColor,
                                 contentColor = Color(0xFF0C0E1A)
@@ -1174,9 +1343,13 @@ fun LyricsView(
                     val pasteButton: @Composable (Modifier) -> Unit = { btnModifier ->
                         OutlinedButton(
                             onClick = {
-                                pastedLyricsInput = ""
-                                editorInitialTab = LyricsEditorTab.PASTE_EDIT
-                                showPasteDialog = true
+                                if (studioController != null) {
+                                    studioController.openEditor(LyricsEditorTab.PASTE_EDIT)
+                                } else {
+                                    pastedLyricsInput = ""
+                                    editorInitialTab = LyricsEditorTab.PASTE_EDIT
+                                    showLocalDialog = true
+                                }
                             },
                             border = androidx.compose.foundation.BorderStroke(1.dp, primaryColor.copy(alpha = 0.7f)),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
@@ -1222,13 +1395,12 @@ fun LyricsView(
                 }
             }
         } else {
-            Box(modifier = Modifier.fillMaxSize()) {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 50.dp, bottom = 36.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
                     itemsIndexed(lyrics) { index, line ->
                         val isActive = if (isSyncedTrack) index == activeIndex else false
                         val nextLineTime = lyrics.getOrNull(index + 1)?.timeMs ?: (line.timeMs + 4200L)
@@ -1393,26 +1565,13 @@ fun LyricsView(
                                     )
                                 }
                             }
-                        }
                     }
                 }
-
-                LyricsControlOverlayBar(
-                    hasWordSync = hasWordSync,
-                    isSyncedTrack = isSyncedTrack,
-                    primaryColor = primaryColor,
-                    onEditLyrics = { openEditor(LyricsEditorTab.PASTE_EDIT) },
-                    onOpenTapSync = { openEditor(LyricsEditorTab.TAP_SYNC) },
-                    onImportFile = { lrcFilePickerLauncher.launch(arrayOf("*/*")) },
-                    onRefetchOnline = onRefetchLyrics,
-                    onClearLyrics = onClearLyrics,
-                    modifier = Modifier.align(Alignment.TopCenter)
-                )
             }
         }
     }
 
-    if (showPasteDialog) {
+    if (studioController == null && showLocalDialog) {
         val hasExisting = !(lyrics.isEmpty() || (lyrics.size == 1 && lyrics[0].text.contains("No embedded lyrics", ignoreCase = true)))
         LyricsEditorDialog(
             initialText = pastedLyricsInput,
@@ -1421,13 +1580,11 @@ fun LyricsView(
             trackDurationMs = trackDurationMs,
             currentPositionMs = currentPositionMs,
             primaryColor = primaryColor,
-            onDismiss = { showPasteDialog = false },
+            onDismiss = { showLocalDialog = false },
             onSave = { updatedRaw ->
                 onSavePastedLyrics(updatedRaw)
             },
-            onPickFile = {
-                lrcFilePickerLauncher.launch(arrayOf("*/*"))
-            },
+            onPickFile = launchFilePicker,
             onClearLyrics = onClearLyrics
         )
     }

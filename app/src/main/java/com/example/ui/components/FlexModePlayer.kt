@@ -1,16 +1,28 @@
 package com.example.ui.components
 
 import android.app.Activity
+import android.net.Uri
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import kotlin.coroutines.cancellation.CancellationException
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.example.data.AnimatedArtRepository
+import com.example.data.AnimatedCoverMedia
 import com.example.model.ButtonAnimationEffect
 import com.example.model.LyricsAnimationSpeed
 import com.example.model.LyricsAnimationStyle
@@ -76,6 +88,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.Favorite
@@ -122,6 +135,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.offset
@@ -140,10 +155,12 @@ import kotlin.math.roundToInt
 import com.example.model.ElementColors
 import com.example.model.RepeatMode
 import com.example.model.Track
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
 import com.example.ui.theme.OneUISquircleMedium
 import com.example.ui.theme.OneUISquircleSmall
+import com.example.ui.theme.bouncableClick
 import com.example.ui.theme.parseHexColor
 import com.example.ui.theme.glassmorphism
 
@@ -205,6 +222,13 @@ fun FlexModePlayer(
     lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
     lyricsGlowEnabled: Boolean = true,
     isLoadingLyrics: Boolean = false,
+    displayMode: DisplayMode = DisplayMode.ARTWORK,
+    onDisplayModeChange: (DisplayMode) -> Unit = {},
+    enableAnimatedCovers: Boolean = true,
+    autoFetchAnimatedCoversWifiOnly: Boolean = true,
+    simulateMotionOnStaticCovers: Boolean = true,
+    onImportAnimatedCover: (Uri) -> Unit = {},
+    onRemoveCustomAnimatedCover: () -> Unit = {},
     onImportLyricsUri: (android.net.Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
     loadEditableLyrics: (suspend () -> String)? = null,
@@ -249,12 +273,37 @@ fun FlexModePlayer(
     }
     var flexDisplayMode by remember(tabletopTopLayout) {
         mutableStateOf(
-            if (tabletopTopLayout == TabletopTopLayout.SPLIT_ART_LYRICS) DisplayMode.SPLIT else DisplayMode.ARTWORK
+            if (displayMode == DisplayMode.ARTWORK && tabletopTopLayout == TabletopTopLayout.SPLIT_ART_LYRICS) {
+                DisplayMode.SPLIT
+            } else {
+                displayMode
+            }
         )
     }
+    LaunchedEffect(displayMode, tabletopTopLayout) {
+        flexDisplayMode = if (displayMode == DisplayMode.ARTWORK && tabletopTopLayout == TabletopTopLayout.SPLIT_ART_LYRICS) {
+            DisplayMode.SPLIT
+        } else {
+            displayMode
+        }
+    }
+    val updateFlexDisplayMode: (DisplayMode) -> Unit = { newMode ->
+        flexDisplayMode = newMode
+        onDisplayModeChange(newMode)
+    }
+
+    var showAnimatedCoverDialog by remember { mutableStateOf(false) }
+    val animatedCoverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportAnimatedCover(uri)
+        }
+    }
+
     var showTrackListOnBottom by remember { mutableStateOf(false) }
-    var isDraggingSlider by remember { mutableStateOf(false) }
-    var sliderDragPosition by remember { mutableFloatStateOf(0f) }
+    var isDraggingSlider by remember(track.id) { mutableStateOf(false) }
+    var sliderDragPosition by remember(track.id) { mutableFloatStateOf(0f) }
     var isEditMode by remember { mutableStateOf(false) }
     var currentPositions by remember(tabletopControlPositions) { mutableStateOf(tabletopControlPositions) }
 
@@ -264,9 +313,21 @@ fun FlexModePlayer(
         currentPositionMs
     }
 
-    val animatedPrimary by animateColorAsState(track.primaryColor, label = "flex_bg_primary")
-    val animatedSecondary by animateColorAsState(track.secondaryColor, label = "flex_bg_secondary")
-    val animatedAccent by animateColorAsState(track.accentColor, label = "flex_bg_accent")
+    val animatedPrimary by animateColorAsState(
+        targetValue = track.primaryColor,
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "flex_bg_primary"
+    )
+    val animatedSecondary by animateColorAsState(
+        targetValue = track.secondaryColor,
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "flex_bg_secondary"
+    )
+    val animatedAccent by animateColorAsState(
+        targetValue = track.accentColor,
+        animationSpec = MotionSpecs.expressiveSpring(),
+        label = "flex_bg_accent"
+    )
 
     // Comprehensive Tabletop Element Colors (only apply custom hex overrides when Individual Elements mode is active)
     val customTopBg = if (useCustomElementColors) parseHexColor(elementColors.tabletopTopHalfBackground) else null
@@ -288,7 +349,35 @@ fun FlexModePlayer(
     val ttVolume = (if (useCustomElementColors) parseHexColor(elementColors.tabletopVolumeTrack) ?: parseHexColor(elementColors.playerVolumeTrack) else null) ?: animatedAccent
     val ttVis = (if (useCustomElementColors) parseHexColor(elementColors.tabletopVisualizerColor) else null) ?: animatedAccent
 
+    val lyricsController = rememberLyricsStudioController(
+        track = track,
+        currentPositionMs = activePositionMs,
+        accentColor = ttLyricsHighlight,
+        onImportLyricsUri = onImportLyricsUri,
+        onSavePastedLyrics = onSavePastedLyrics,
+        loadEditableLyrics = loadEditableLyrics,
+        onClearLyrics = onClearLyrics
+    )
+
     val insetsToUse = if (tabletopImmersiveMode) WindowInsets(0, 0, 0, 0) else WindowInsets.safeDrawing
+
+    val animatedArtCacheVersion by AnimatedArtRepository.cacheVersion.collectAsStateWithLifecycle()
+
+    if (showAnimatedCoverDialog) {
+        val hasCustomAnimated = remember(track.id, track.artist, track.album, track.title, animatedArtCacheVersion) {
+            AnimatedArtRepository.getCachedOrSidecarImmediate(context, track) != AnimatedCoverMedia.None
+        }
+        AnimatedCoverOptionsDialog(
+            track = track,
+            hasCustomCover = hasCustomAnimated,
+            accentColor = animatedAccent,
+            onDismiss = { showAnimatedCoverDialog = false },
+            onPickAnimatedFile = {
+                animatedCoverPickerLauncher.launch(arrayOf("video/mp4", "video/webm", "image/gif", "image/webp"))
+            },
+            onRemoveCustomCover = onRemoveCustomAnimatedCover
+        )
+    }
 
     Box(
         modifier = modifier
@@ -367,27 +456,35 @@ fun FlexModePlayer(
                             selected = flexDisplayMode == DisplayMode.ARTWORK,
                             title = "Art",
                             accentColor = animatedAccent,
-                            onClick = { flexDisplayMode = DisplayMode.ARTWORK }
+                            onClick = { updateFlexDisplayMode(DisplayMode.ARTWORK) }
                         )
-                        ModePillButton(
+                        LyricsModePillWithDropdown(
                             selected = flexDisplayMode == DisplayMode.LYRICS,
-                            title = "Lyrics",
+                            isLyricsVisible = flexDisplayMode == DisplayMode.LYRICS || flexDisplayMode == DisplayMode.SPLIT,
+                            controller = lyricsController,
                             accentColor = animatedAccent,
-                            onClick = { flexDisplayMode = DisplayMode.LYRICS }
+                            onClick = { updateFlexDisplayMode(DisplayMode.LYRICS) },
+                            onEnsureLyricsMode = {
+                                if (flexDisplayMode != DisplayMode.LYRICS && flexDisplayMode != DisplayMode.SPLIT) {
+                                    updateFlexDisplayMode(DisplayMode.LYRICS)
+                                }
+                            },
+                            onRefetchOnline = onRefetchLyrics,
+                            onClearLyrics = onClearLyrics
                         )
                         ModePillButton(
                             selected = flexDisplayMode == DisplayMode.SPLIT,
                             title = "Split",
                             accentColor = animatedAccent,
-                            onClick = { flexDisplayMode = DisplayMode.SPLIT }
+                            onClick = { updateFlexDisplayMode(DisplayMode.SPLIT) }
                         )
                         VisualizerModePillWithDropdown(
                             selected = flexDisplayMode == DisplayMode.VISUALIZER,
                             currentStyle = visualizerStyle,
                             accentColor = animatedAccent,
-                            onClick = { flexDisplayMode = DisplayMode.VISUALIZER },
+                            onClick = { updateFlexDisplayMode(DisplayMode.VISUALIZER) },
                             onStyleSelected = { newStyle ->
-                                flexDisplayMode = DisplayMode.VISUALIZER
+                                updateFlexDisplayMode(DisplayMode.VISUALIZER)
                                 onVisualizerStyleChange(newStyle)
                             }
                         )
@@ -405,6 +502,15 @@ fun FlexModePlayer(
                 ) {
                     AnimatedContent(
                         targetState = flexDisplayMode,
+                        transitionSpec = {
+                            (fadeIn(animationSpec = MotionSpecs.snappySpring()) + scaleIn(
+                                initialScale = 0.96f,
+                                animationSpec = MotionSpecs.snappySpring()
+                            )) togetherWith (fadeOut(animationSpec = MotionSpecs.snappySpring()) + scaleOut(
+                                targetScale = 0.96f,
+                                animationSpec = MotionSpecs.snappySpring()
+                            ))
+                        },
                         label = "flex_view_content"
                     ) { mode ->
                         when (mode) {
@@ -439,7 +545,12 @@ fun FlexModePlayer(
                                         size = tabletopAlbumArtSize.sizeDp.dp,
                                         cornerRadius = (tabletopAlbumArtSize.sizeDp * 0.13f).coerceIn(16f, 36f).dp,
                                         isPlaying = isPlaying,
-                                        showVinylPeek = true
+                                        showVinylPeek = true,
+                                        animatePlaybackScale = true,
+                                        enableAnimatedCover = enableAnimatedCovers,
+                                        autoFetchWifiOnly = autoFetchAnimatedCoversWifiOnly,
+                                        simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                                        onLongPress = { showAnimatedCoverDialog = true }
                                     )
                                 }
                             }
@@ -460,8 +571,8 @@ fun FlexModePlayer(
                                     onImportLyricsUri = onImportLyricsUri,
                                     onSavePastedLyrics = onSavePastedLyrics,
                                     loadEditableLyrics = loadEditableLyrics,
-                                    onRefetchLyrics = onRefetchLyrics,
-                                    onClearLyrics = onClearLyrics
+                                    onClearLyrics = onClearLyrics,
+                                    studioController = lyricsController
                                 )
                             }
                             DisplayMode.SPLIT -> {
@@ -490,7 +601,12 @@ fun FlexModePlayer(
                                             size = (tabletopAlbumArtSize.sizeDp * 0.82f).dp,
                                             cornerRadius = 18.dp,
                                             isPlaying = isPlaying,
-                                            showVinylPeek = true
+                                            showVinylPeek = true,
+                                            animatePlaybackScale = true,
+                                            enableAnimatedCover = enableAnimatedCovers,
+                                            autoFetchWifiOnly = autoFetchAnimatedCoversWifiOnly,
+                                            simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                                            onLongPress = { showAnimatedCoverDialog = true }
                                         )
                                     }
 
@@ -519,8 +635,8 @@ fun FlexModePlayer(
                                             onImportLyricsUri = onImportLyricsUri,
                                             onSavePastedLyrics = onSavePastedLyrics,
                                             loadEditableLyrics = loadEditableLyrics,
-                                            onRefetchLyrics = onRefetchLyrics,
-                                            onClearLyrics = onClearLyrics
+                                            onClearLyrics = onClearLyrics,
+                                            studioController = lyricsController
                                         )
                                     }
                                 }
@@ -581,7 +697,11 @@ fun FlexModePlayer(
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                     color = ttTitle,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(iterations = Int.MAX_VALUE)
                 )
                 Text(
                     text = "${track.artist} • ${track.album}",
@@ -688,12 +808,14 @@ fun FlexModePlayer(
                         onExitFlexMode = onExitFlexMode,
                         onOpenEqualizer = onOpenEqualizer,
                         onOpenDisplayMode = {
-                            flexDisplayMode = when (flexDisplayMode) {
-                                DisplayMode.ARTWORK -> DisplayMode.LYRICS
-                                DisplayMode.LYRICS -> DisplayMode.SPLIT
-                                DisplayMode.SPLIT -> DisplayMode.VISUALIZER
-                                DisplayMode.VISUALIZER -> DisplayMode.ARTWORK
-                            }
+                            updateFlexDisplayMode(
+                                when (flexDisplayMode) {
+                                    DisplayMode.ARTWORK -> DisplayMode.LYRICS
+                                    DisplayMode.LYRICS -> DisplayMode.SPLIT
+                                    DisplayMode.SPLIT -> DisplayMode.VISUALIZER
+                                    DisplayMode.VISUALIZER -> DisplayMode.ARTWORK
+                                }
+                            )
                         }
                     )
                 } else {
@@ -854,12 +976,18 @@ fun FlexModePlayer(
                                         .glassmorphism(shape = CircleShape, backgroundColor = Color(0x20FFFFFF)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(
-                                        imageVector = if (track.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                        contentDescription = "Favorite",
-                                        tint = if (track.isFavorite) Color(0xFFFF4081) else Color(0x99FFFFFF),
-                                        modifier = Modifier.size(20.dp)
-                                    )
+                                    AnimatedContent(
+                                        targetState = track.isFavorite,
+                                        transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                        label = "flex_fav_morph"
+                                    ) { isFav ->
+                                        Icon(
+                                            imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                            contentDescription = "Favorite",
+                                            tint = if (isFav) Color(0xFFFF4081) else Color(0x99FFFFFF),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -922,9 +1050,14 @@ fun FlexModePlayer(
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
+                                                .animateItem(
+                                                    fadeInSpec = MotionSpecs.snappySpring(),
+                                                    placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                                                    fadeOutSpec = MotionSpecs.snappySpring()
+                                                )
                                                 .clip(OneUISquircleSmall)
                                                 .background(if (isSelected) animatedAccent.copy(alpha = 0.25f) else Color(0x18FFFFFF))
-                                                .clickable { onPlayFromContext(allTracks, index) }
+                                                .bouncableClick(pressedScale = 0.96f) { onPlayFromContext(allTracks, index) }
                                                 .padding(horizontal = 8.dp, vertical = 6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
@@ -962,7 +1095,14 @@ fun FlexModePlayer(
                                                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                                                     color = if (isSelected) animatedAccent else Color.White,
                                                     maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = if (isSelected) {
+                                                        Modifier
+                                                            .fillMaxWidth()
+                                                            .basicMarquee(iterations = Int.MAX_VALUE)
+                                                    } else {
+                                                        Modifier
+                                                    }
                                                 )
                                                 Text(
                                                     itemTrack.artist,
@@ -1224,11 +1364,11 @@ fun FlexModePlayer(
                 }
 
                 val springSpec = when (buttonAnimationEffect) {
-                    ButtonAnimationEffect.BOUNCY_SPRING -> spring<Float>(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-                    ButtonAnimationEffect.ROTATION_TILT -> spring<Float>(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow)
-                    ButtonAnimationEffect.NEON_GLOW_POP -> spring<Float>(dampingRatio = Spring.DampingRatioHighBouncy, stiffness = Spring.StiffnessMediumLow)
-                    ButtonAnimationEffect.JELLY_SQUISH -> spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessLow)
-                    ButtonAnimationEffect.SUBTLE_HAPTIC -> spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium)
+                    ButtonAnimationEffect.BOUNCY_SPRING -> MotionSpecs.TactilePressSpring
+                    ButtonAnimationEffect.ROTATION_TILT -> MotionSpecs.ExpressiveSpring
+                    ButtonAnimationEffect.NEON_GLOW_POP -> spring<Float>(dampingRatio = 0.58f, stiffness = Spring.StiffnessMedium)
+                    ButtonAnimationEffect.JELLY_SQUISH -> spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow)
+                    ButtonAnimationEffect.SUBTLE_HAPTIC -> MotionSpecs.SnappySpring
                 }
 
                 val prevScaleX by animateFloatAsState(targetValue = prevTargetScaleX, animationSpec = springSpec, label = "tt_prev_sx")
@@ -1375,12 +1515,18 @@ fun FlexModePlayer(
                                         .testTag("flex_play_pause_button"),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(
-                                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                        contentDescription = if (isPlaying) "Pause" else "Play",
-                                        tint = ttPlayIcon,
-                                        modifier = Modifier.size(28.dp * buttonScale)
-                                    )
+                                    AnimatedContent(
+                                        targetState = isPlaying,
+                                        transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                        label = "flex_play_icon_morph"
+                                    ) { playing ->
+                                        Icon(
+                                            imageVector = if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                            contentDescription = if (playing) "Pause" else "Play",
+                                            tint = ttPlayIcon,
+                                            modifier = Modifier.size(28.dp * buttonScale)
+                                        )
+                                    }
                                 }
                             }
                         )
@@ -1545,12 +1691,18 @@ fun FlexModePlayer(
                                         .testTag("flex_shuffle_button"),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(
-                                        Icons.Default.Shuffle,
-                                        "Shuffle",
-                                        tint = if (isShuffleActive) ttActiveTint else ttSecBtns,
-                                        modifier = Modifier.size(18.dp * buttonScale)
-                                    )
+                                    AnimatedContent(
+                                        targetState = isShuffleActive,
+                                        transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                        label = "flex_shuffle_icon_morph"
+                                    ) { active ->
+                                        Icon(
+                                            Icons.Default.Shuffle,
+                                            "Shuffle",
+                                            tint = if (active) ttActiveTint else ttSecBtns,
+                                            modifier = Modifier.size(18.dp * buttonScale)
+                                        )
+                                    }
                                 }
                             }
                         )
@@ -1599,12 +1751,18 @@ fun FlexModePlayer(
                                         .testTag("flex_repeat_button"),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(
-                                        imageVector = if (repeatMode == RepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
-                                        contentDescription = "Repeat",
-                                        tint = if (repeatMode != RepeatMode.OFF) ttActiveTint else ttSecBtns,
-                                        modifier = Modifier.size(18.dp * buttonScale)
-                                    )
+                                    AnimatedContent(
+                                        targetState = repeatMode,
+                                        transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                        label = "flex_repeat_icon_morph"
+                                    ) { mode ->
+                                        Icon(
+                                            imageVector = if (mode == RepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                                            contentDescription = "Repeat",
+                                            tint = if (mode != RepeatMode.OFF) ttActiveTint else ttSecBtns,
+                                            modifier = Modifier.size(18.dp * buttonScale)
+                                        )
+                                    }
                                 }
                             }
                         )
@@ -1769,10 +1927,15 @@ private fun NetflixDuoTabletopConsole(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .animateItem(
+                                    fadeInSpec = MotionSpecs.snappySpring(),
+                                    placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                                    fadeOutSpec = MotionSpecs.snappySpring()
+                                )
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(if (isSelected) netflixRed.copy(alpha = 0.22f) else Color(0x18FFFFFF))
                                 .border(1.dp, if (isSelected) netflixRed else Color.Transparent, RoundedCornerShape(12.dp))
-                                .clickable { onPlayFromContext(allTracks, index) }
+                                .bouncableClick(pressedScale = 0.96f) { onPlayFromContext(allTracks, index) }
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -1788,7 +1951,14 @@ private fun NetflixDuoTabletopConsole(
                                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                                     color = if (isSelected) netflixRed else Color.White,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = if (isSelected) {
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .basicMarquee(iterations = Int.MAX_VALUE)
+                                    } else {
+                                        Modifier
+                                    }
                                 )
                                 Text(
                                     text = itemTrack.artist,
@@ -1930,8 +2100,10 @@ private fun NetflixDuoTabletopConsole(
         }
     } else {
         // Scrubber drag state
-        var isDragging by remember { mutableStateOf(false) }
-        var dragFraction by remember { mutableFloatStateOf(0f) }
+        var isDragging by remember(track.id) { mutableStateOf(false) }
+        var dragFraction by remember(track.id) { mutableFloatStateOf(0f) }
+        val currentTrackDurationMs by rememberUpdatedState(trackDurationMs)
+        val currentOnSeek by rememberUpdatedState(onSeek)
         val currentProgress = if (isDragging) dragFraction else {
             if (trackDurationMs > 0) (activePositionMs.toFloat() / trackDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
         }
@@ -2025,11 +2197,11 @@ private fun NetflixDuoTabletopConsole(
         }
 
         val springSpec = when (buttonAnimationEffect) {
-            ButtonAnimationEffect.BOUNCY_SPRING -> spring<Float>(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-            ButtonAnimationEffect.ROTATION_TILT -> spring<Float>(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow)
-            ButtonAnimationEffect.NEON_GLOW_POP -> spring<Float>(dampingRatio = Spring.DampingRatioHighBouncy, stiffness = Spring.StiffnessMediumLow)
-            ButtonAnimationEffect.JELLY_SQUISH -> spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessLow)
-            ButtonAnimationEffect.SUBTLE_HAPTIC -> spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium)
+            ButtonAnimationEffect.BOUNCY_SPRING -> MotionSpecs.TactilePressSpring
+            ButtonAnimationEffect.ROTATION_TILT -> MotionSpecs.ExpressiveSpring
+            ButtonAnimationEffect.NEON_GLOW_POP -> spring<Float>(dampingRatio = 0.58f, stiffness = Spring.StiffnessMedium)
+            ButtonAnimationEffect.JELLY_SQUISH -> spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow)
+            ButtonAnimationEffect.SUBTLE_HAPTIC -> MotionSpecs.SnappySpring
         }
 
         val prevScaleX by animateFloatAsState(targetValue = prevTargetScaleX, animationSpec = springSpec, label = "netflix_prev_sx")
@@ -2080,7 +2252,7 @@ private fun NetflixDuoTabletopConsole(
                         .clip(RoundedCornerShape(14.dp))
                         .background(cardBg)
                         .border(1.dp, cardBorder, RoundedCornerShape(14.dp))
-                        .clickable { onExitFlexMode() }
+                        .bouncableClick(pressedScale = 0.92f) { onExitFlexMode() }
                         .testTag("netflix_duo_close_btn"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -2100,7 +2272,7 @@ private fun NetflixDuoTabletopConsole(
                         .clip(RoundedCornerShape(14.dp))
                         .background(cardBg)
                         .border(1.dp, cardBorder, RoundedCornerShape(14.dp))
-                        .clickable { onToggleTrackList() }
+                        .bouncableClick(pressedScale = 0.97f) { onToggleTrackList() }
                         .padding(horizontal = 12.dp)
                         .testTag("netflix_duo_track_info_bar"),
                     verticalAlignment = Alignment.CenterVertically
@@ -2133,7 +2305,10 @@ private fun NetflixDuoTabletopConsole(
                             ),
                             color = Color.White,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .basicMarquee(iterations = Int.MAX_VALUE)
                         )
                         Text(
                             text = if (track.artist.isNotBlank()) track.artist else "OneMusic Expressive",
@@ -2160,7 +2335,7 @@ private fun NetflixDuoTabletopConsole(
                         .clip(RoundedCornerShape(14.dp))
                         .background(cardBg)
                         .border(1.dp, cardBorder, RoundedCornerShape(14.dp))
-                        .clickable { onOpenDisplayMode() }
+                        .bouncableClick(pressedScale = 0.92f) { onOpenDisplayMode() }
                         .testTag("netflix_duo_display_mode_btn"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -2184,7 +2359,7 @@ private fun NetflixDuoTabletopConsole(
                         .clip(RoundedCornerShape(14.dp))
                         .background(cardBg)
                         .border(1.dp, cardBorder, RoundedCornerShape(14.dp))
-                        .clickable { onOpenEqualizer() }
+                        .bouncableClick(pressedScale = 0.92f) { onOpenEqualizer() }
                         .testTag("netflix_duo_audio_tools_btn"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -2276,12 +2451,18 @@ private fun NetflixDuoTabletopConsole(
                         .testTag("netflix_duo_play_pause"),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = Color.White,
-                        modifier = Modifier.size((62 * iconScaleFactor.coerceIn(0.85f, 2.5f)).dp)
-                    )
+                    AnimatedContent(
+                        targetState = isPlaying,
+                        transitionSpec = { MotionSpecs.iconMorphTransition() },
+                        label = "netflix_play_icon_morph"
+                    ) { playing ->
+                        Icon(
+                            imageVector = if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (playing) "Pause" else "Play",
+                            tint = Color.White,
+                            modifier = Modifier.size((62 * iconScaleFactor.coerceIn(0.85f, 2.5f)).dp)
+                        )
+                    }
                 }
 
                 // Right Massive Tile: Next Track (Screenshot 1)
@@ -2346,29 +2527,38 @@ private fun NetflixDuoTabletopConsole(
                     BoxWithConstraints(
                         modifier = Modifier
                             .weight(1f)
-                            .height(34.dp)
-                            .pointerInput(trackDurationMs) {
-                                detectTapGestures { offset ->
-                                    val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    onSeek((frac * trackDurationMs).toLong())
+                            .height(48.dp)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                    isDragging = true
+                                    var latestFraction = (down.position.x / widthPx).coerceIn(0f, 1f)
+                                    dragFraction = latestFraction
+                                    down.consume()
+
+                                    var activePointerId = down.id
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == activePointerId }
+                                            ?: event.changes.firstOrNull()
+                                            ?: break
+                                        activePointerId = change.id
+                                        if (!change.pressed) {
+                                            latestFraction = (change.position.x / widthPx).coerceIn(0f, 1f)
+                                            dragFraction = latestFraction
+                                            change.consume()
+                                            break
+                                        }
+                                        if (change.position != change.previousPosition) {
+                                            latestFraction = (change.position.x / widthPx).coerceIn(0f, 1f)
+                                            dragFraction = latestFraction
+                                            change.consume()
+                                        }
+                                    }
+                                    isDragging = false
+                                    currentOnSeek((latestFraction * currentTrackDurationMs).toLong())
                                 }
-                            }
-                            .pointerInput(trackDurationMs) {
-                                detectHorizontalDragGestures(
-                                    onDragStart = { offset ->
-                                        isDragging = true
-                                        dragFraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    },
-                                    onHorizontalDrag = { change, _ ->
-                                        change.consume()
-                                        dragFraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    },
-                                    onDragEnd = {
-                                        isDragging = false
-                                        onSeek((dragFraction * trackDurationMs).toLong())
-                                    },
-                                    onDragCancel = { isDragging = false }
-                                )
                             },
                         contentAlignment = Alignment.CenterStart
                     ) {
@@ -2584,12 +2774,18 @@ private fun NetflixDuoTabletopConsole(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            imageVector = if (repeatMode == RepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
-                            contentDescription = "Repeat Mode: ${repeatMode.name}",
-                            tint = if (repeatMode == RepeatMode.OFF) Color(0x66FFFFFF) else Color.White,
-                            modifier = Modifier.size((18 * iconScaleFactor.coerceAtMost(1.3f)).dp)
-                        )
+                        AnimatedContent(
+                            targetState = repeatMode,
+                            transitionSpec = { MotionSpecs.iconMorphTransition() },
+                            label = "netflix_repeat_icon_morph"
+                        ) { mode ->
+                            Icon(
+                                imageVector = if (mode == RepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                                contentDescription = "Repeat Mode: ${mode.name}",
+                                tint = if (mode == RepeatMode.OFF) Color(0x66FFFFFF) else Color.White,
+                                modifier = Modifier.size((18 * iconScaleFactor.coerceAtMost(1.3f)).dp)
+                            )
+                        }
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = when (repeatMode) {

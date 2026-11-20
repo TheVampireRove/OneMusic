@@ -2,8 +2,10 @@ package com.example.ui.components
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,6 +16,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -26,13 +30,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Timer
@@ -42,6 +46,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -53,16 +58,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -83,10 +89,13 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.data.LyricsRepository
 import com.example.model.LyricLine
 import com.example.model.LyricsAnimationStyle
+import com.example.model.Track
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
 import com.example.ui.theme.OneUISquircleMedium
-import com.example.ui.theme.glassmorphism
+import com.example.ui.theme.bouncableClick
+import kotlinx.coroutines.launch
 
 enum class LyricsEditorTab {
     PASTE_EDIT,
@@ -194,177 +203,297 @@ fun WordSyncedLyricText(
     )
 }
 
+@Stable
+class LyricsStudioController(
+    val hasWordSync: Boolean,
+    val isSyncedTrack: Boolean,
+    val hasUsableLyrics: Boolean,
+    private val openEditorAction: (LyricsEditorTab) -> Unit,
+    private val launchPickerAction: () -> Unit
+) {
+    fun openEditor(tab: LyricsEditorTab = LyricsEditorTab.PASTE_EDIT) = openEditorAction(tab)
+    fun launchFilePicker() = launchPickerAction()
+}
+
 /**
- * Unobtrusive glass header bar shown above active lyrics so the user can always
- * inspect sync precision (Word-Synced / Synced / Plain), edit or replace wrong lyrics,
- * import a replacement .LRC file, tap-sync plain lyrics, re-fetch from LRCLIB, or clear them.
+ * Shared controller hoisting the Lyrics Studio modal and `.lrc` / `.txt` document picker
+ * so both [LyricsModePillWithDropdown] and [LyricsView] can open and manage lyrics cleanly.
  */
 @Composable
-fun LyricsControlOverlayBar(
-    hasWordSync: Boolean,
-    isSyncedTrack: Boolean,
-    primaryColor: Color,
-    onEditLyrics: () -> Unit,
-    onOpenTapSync: () -> Unit,
-    onImportFile: () -> Unit,
-    onRefetchOnline: (() -> Unit)?,
-    onClearLyrics: (() -> Unit)?,
-    modifier: Modifier = Modifier
-) {
-    var menuExpanded by remember { mutableStateOf(false) }
+fun rememberLyricsStudioController(
+    track: Track,
+    currentPositionMs: Long,
+    accentColor: Color,
+    onImportLyricsUri: (Uri) -> Unit,
+    onSavePastedLyrics: (String) -> Unit,
+    loadEditableLyrics: (suspend () -> String)? = null,
+    onClearLyrics: (() -> Unit)? = null,
+    onOpenExternalEditor: ((LyricsEditorTab) -> Unit)? = null
+): LyricsStudioController {
+    val coroutineScope = rememberCoroutineScope()
+    var showEditorDialog by remember { mutableStateOf(false) }
+    var editorInitialTab by remember { mutableStateOf(LyricsEditorTab.PASTE_EDIT) }
+    var pastedLyricsInput by remember { mutableStateOf("") }
 
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color(0xD815172B), Color(0x8815172B), Color.Transparent)
-                )
-            )
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+    val lrcFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportLyricsUri(uri)
+        }
+    }
+
+    val lyrics = track.lyrics
+    val hasUsableLyrics = remember(lyrics) {
+        lyrics.isNotEmpty() &&
+            !(lyrics.size == 1 && lyrics[0].text.contains("No embedded lyrics", ignoreCase = true))
+    }
+    val isSyncedTrack = remember(lyrics, hasUsableLyrics) { hasUsableLyrics && lyrics.any { it.isSynced } }
+    val hasWordSync = remember(lyrics, hasUsableLyrics) { hasUsableLyrics && lyrics.any { it.words.isNotEmpty() } }
+
+    if (onOpenExternalEditor == null && showEditorDialog) {
+        LyricsEditorDialog(
+            initialText = pastedLyricsInput,
+            initialTab = editorInitialTab,
+            hasExistingLyrics = hasUsableLyrics,
+            trackDurationMs = track.durationMs,
+            currentPositionMs = currentPositionMs,
+            primaryColor = accentColor,
+            onDismiss = { showEditorDialog = false },
+            onSave = { updatedRaw ->
+                onSavePastedLyrics(updatedRaw)
+            },
+            onPickFile = {
+                lrcFilePickerLauncher.launch(arrayOf("*/*"))
+            },
+            onClearLyrics = onClearLyrics
+        )
+    }
+
+    return remember(
+        track.id,
+        lyrics,
+        hasWordSync,
+        isSyncedTrack,
+        hasUsableLyrics,
+        loadEditableLyrics,
+        onOpenExternalEditor,
+        lrcFilePickerLauncher
     ) {
-        // Left: Sync mode indicator chip
-        Row(
-            modifier = Modifier
-                .clip(OneUIPillShape)
-                .background(Color(0x2AFFFFFF))
-                .border(0.8.dp, Color(0x28FFFFFF), OneUIPillShape)
-                .padding(horizontal = 10.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        LyricsStudioController(
+            hasWordSync = hasWordSync,
+            isSyncedTrack = isSyncedTrack,
+            hasUsableLyrics = hasUsableLyrics,
+            openEditorAction = { tab ->
+                if (onOpenExternalEditor != null) {
+                    onOpenExternalEditor(tab)
+                } else {
+                    editorInitialTab = tab
+                    pastedLyricsInput = if (hasUsableLyrics) {
+                        LyricsRepository.serializeLyricsToLrc(lyrics)
+                    } else {
+                        ""
+                    }
+                    showEditorDialog = true
+                    if (hasUsableLyrics && loadEditableLyrics != null) {
+                        coroutineScope.launch {
+                            val loaded = loadEditableLyrics.invoke()
+                            if (loaded.isNotBlank()) {
+                                pastedLyricsInput = loaded
+                            }
+                        }
+                    }
+                }
+            },
+            launchPickerAction = {
+                lrcFilePickerLauncher.launch(arrayOf("*/*"))
+            }
+        )
+    }
+}
+
+/**
+ * Lyrics Mode Pill with direct dropdown menu matching [VisualizerModePillWithDropdown],
+ * housing the current sync status badge (`Synced LRC` / `Word-Synced` / `Plain Text`) and
+ * quick actions (`Edit / Paste Word-Synced`, `Live Tap-Sync Studio`, `Replace with .LRC / .TXT`,
+ * `Re-fetch Online (LRCLIB)`, `Clear Lyrics`).
+ */
+@Composable
+fun LyricsModePillWithDropdown(
+    selected: Boolean,
+    isLyricsVisible: Boolean = selected,
+    controller: LyricsStudioController,
+    accentColor: Color,
+    onClick: () -> Unit,
+    onEnsureLyricsMode: () -> Unit = onClick,
+    onRefetchOnline: (() -> Unit)? = null,
+    onClearLyrics: (() -> Unit)? = null
+) {
+    var isDropdownOpen by remember { mutableStateOf(false) }
+
+    val statusLabel = when {
+        !controller.hasUsableLyrics -> "No Lyrics"
+        controller.hasWordSync -> "Word-Synced"
+        controller.isSyncedTrack -> "Synced LRC"
+        else -> "Plain Text"
+    }
+
+    val pillBg by animateColorAsState(
+        targetValue = if (selected) accentColor else Color.Transparent,
+        animationSpec = MotionSpecs.snappySpring(),
+        label = "lyrics_mode_pill_bg"
+    )
+
+    Box {
+        OneUITooltipButton(
+            name = "Lyrics View ($statusLabel) - Tap or Dropdown for Options",
+            onClick = {
+                onClick()
+                if (selected) {
+                    isDropdownOpen = true
+                }
+            }
         ) {
-            Icon(
-                imageVector = if (hasWordSync) Icons.Default.AutoAwesome else Icons.Default.MusicNote,
-                contentDescription = "Lyrics Sync Mode",
-                tint = if (hasWordSync || isSyncedTrack) primaryColor else Color(0xAAFFFFFF),
-                modifier = Modifier.size(13.dp)
-            )
-            Text(
-                text = when {
-                    hasWordSync -> "Word-Synced"
-                    isSyncedTrack -> "Synced LRC"
-                    else -> "Plain Text"
-                },
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = if (hasWordSync) primaryColor else Color(0xDDFFFFFF),
-                maxLines = 1
-            )
+            Box(
+                modifier = Modifier
+                    .clip(OneUIPillShape)
+                    .background(pillBg)
+                    .padding(start = 14.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
+                    .testTag("lyrics_mode_pill"),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = "Lyrics",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = if (selected) Color(0xFF0D0F1B) else Color.White
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                if (!isLyricsVisible) {
+                                    onEnsureLyricsMode()
+                                }
+                                isDropdownOpen = true
+                            }
+                            .testTag("lyrics_options_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = "Lyrics Options",
+                            tint = if (selected) Color(0xFF0D0F1B) else Color(0xCCFFFFFF),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
         }
 
-        // Right: Quick Edit + More Actions Menu
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        DropdownMenu(
+            expanded = isDropdownOpen,
+            onDismissRequest = { isDropdownOpen = false },
+            modifier = Modifier
+                .background(Color(0xFF16182C))
+                .border(1.dp, Color(0x38FFFFFF), OneUISquircleMedium)
         ) {
+            // Sync mode status badge header
             Row(
                 modifier = Modifier
-                    .heightIn(min = 36.dp)
-                    .clip(OneUIPillShape)
-                    .background(primaryColor.copy(alpha = 0.22f))
-                    .border(1.dp, primaryColor.copy(alpha = 0.55f), OneUIPillShape)
-                    .clickable(onClick = onEditLyrics)
-                    .padding(horizontal = 11.dp, vertical = 6.dp)
-                    .testTag("edit_lyrics_button"),
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Default.Edit,
-                    contentDescription = "Edit or Replace Lyrics",
-                    tint = Color.White,
-                    modifier = Modifier.size(14.dp)
+                    imageVector = if (controller.hasWordSync) Icons.Default.AutoAwesome else Icons.Default.MusicNote,
+                    contentDescription = "Lyrics Status",
+                    tint = accentColor,
+                    modifier = Modifier.size(15.dp)
                 )
                 Text(
-                    text = "Edit",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = Color.White,
-                    maxLines = 1,
-                    softWrap = false
+                    text = statusLabel,
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                    color = accentColor
                 )
             }
 
-            Box {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0x28FFFFFF))
-                        .clickable { menuExpanded = true }
-                        .testTag("lyrics_options_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "More Lyrics Options",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
+            HorizontalDivider(
+                color = Color(0x24FFFFFF),
+                modifier = Modifier.padding(vertical = 2.dp)
+            )
 
-                DropdownMenu(
-                    expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false },
-                    modifier = Modifier
-                        .background(Color(0xF5181A2E))
-                        .border(1.dp, Color(0x35FFFFFF), OneUISquircleMedium)
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Edit / Paste Word-Synced", color = Color.White) },
-                        leadingIcon = {
-                            Icon(Icons.Default.Edit, contentDescription = null, tint = primaryColor)
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onEditLyrics()
-                        }
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (controller.hasUsableLyrics) "Edit / Paste Word-Synced" else "Paste Lyrics / Word-Synced",
+                        color = Color.White
                     )
-                    DropdownMenuItem(
-                        text = { Text("Live Tap-Sync Studio", color = Color.White) },
-                        leadingIcon = {
-                            Icon(Icons.Default.TouchApp, contentDescription = null, tint = primaryColor)
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onOpenTapSync()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Replace with .LRC / .TXT", color = Color.White) },
-                        leadingIcon = {
-                            Icon(Icons.Default.UploadFile, contentDescription = null, tint = primaryColor)
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onImportFile()
-                        }
-                    )
-                    if (onRefetchOnline != null) {
-                        DropdownMenuItem(
-                            text = { Text("Re-fetch Online (LRCLIB)", color = Color.White) },
-                            leadingIcon = {
-                                Icon(Icons.Default.Refresh, contentDescription = null, tint = primaryColor)
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                onRefetchOnline()
-                            }
-                        )
-                    }
-                    if (onClearLyrics != null) {
-                        DropdownMenuItem(
-                            text = { Text("Clear Lyrics", color = Color(0xFFFF7A85)) },
-                            leadingIcon = {
-                                Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFFF7A85))
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                onClearLyrics()
-                            }
-                        )
-                    }
+                },
+                leadingIcon = {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = accentColor)
+                },
+                onClick = {
+                    isDropdownOpen = false
+                    if (!isLyricsVisible) onEnsureLyricsMode()
+                    controller.openEditor(LyricsEditorTab.PASTE_EDIT)
                 }
+            )
+            DropdownMenuItem(
+                text = { Text("Live Tap-Sync Studio", color = Color.White) },
+                leadingIcon = {
+                    Icon(Icons.Default.TouchApp, contentDescription = null, tint = accentColor)
+                },
+                onClick = {
+                    isDropdownOpen = false
+                    if (!isLyricsVisible) onEnsureLyricsMode()
+                    controller.openEditor(LyricsEditorTab.TAP_SYNC)
+                }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (controller.hasUsableLyrics) "Replace with .LRC / .TXT" else "Import .LRC / .TXT",
+                        color = Color.White
+                    )
+                },
+                leadingIcon = {
+                    Icon(Icons.Default.UploadFile, contentDescription = null, tint = accentColor)
+                },
+                onClick = {
+                    isDropdownOpen = false
+                    if (!isLyricsVisible) onEnsureLyricsMode()
+                    controller.launchFilePicker()
+                }
+            )
+            if (onRefetchOnline != null) {
+                DropdownMenuItem(
+                    text = { Text("Re-fetch Online (LRCLIB)", color = Color.White) },
+                    leadingIcon = {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = accentColor)
+                    },
+                    onClick = {
+                        isDropdownOpen = false
+                        if (!isLyricsVisible) onEnsureLyricsMode()
+                        onRefetchOnline()
+                    }
+                )
+            }
+            if (controller.hasUsableLyrics && onClearLyrics != null) {
+                DropdownMenuItem(
+                    text = { Text("Clear Lyrics", color = Color(0xFFFF7A85)) },
+                    leadingIcon = {
+                        Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFFF7A85))
+                    },
+                    onClick = {
+                        isDropdownOpen = false
+                        onClearLyrics()
+                    }
+                )
             }
         }
     }
@@ -389,16 +518,142 @@ fun LyricsEditorDialog(
     onPickFile: () -> Unit,
     onClearLyrics: (() -> Unit)? = null
 ) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .widthIn(max = 520.dp)
+                .fillMaxWidth(0.94f)
+                .heightIn(max = 680.dp),
+            color = Color(0xFF14162A),
+            shape = OneUISquircleLarge,
+            border = BorderStroke(1.2.dp, Color(0x42FFFFFF)),
+            shadowElevation = 24.dp
+        ) {
+            LyricsStudioPanelContent(
+                initialText = initialText,
+                initialTab = initialTab,
+                hasExistingLyrics = hasExistingLyrics,
+                trackDurationMs = trackDurationMs,
+                currentPositionMs = currentPositionMs,
+                primaryColor = primaryColor,
+                onDismiss = onDismiss,
+                onSave = onSave,
+                onPickFile = onPickFile,
+                onClearLyrics = onClearLyrics,
+                isDockedPane = false
+            )
+        }
+    }
+}
+
+/**
+ * Side-by-side docked panel variant of the Lyrics Studio designed for Foldable / Tablet
+ * Dual-Pane layouts so the user can operate the live playback scrubber and Tap-Sync Studio
+ * side-by-side without any modal overlay blocking the player.
+ */
+@Composable
+fun LyricsEditorDockedPane(
+    track: Track,
+    initialTab: LyricsEditorTab,
+    currentPositionMs: Long,
+    accentColor: Color,
+    onDismiss: () -> Unit,
+    onImportLyricsUri: (Uri) -> Unit,
+    onSavePastedLyrics: (String) -> Unit,
+    loadEditableLyrics: (suspend () -> String)? = null,
+    onClearLyrics: (() -> Unit)? = null,
+    tabRequestKey: Any = Unit,
+    modifier: Modifier = Modifier
+) {
+    val lrcFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportLyricsUri(uri)
+        }
+    }
+
+    val lyrics = track.lyrics
+    val hasUsableLyrics = remember(lyrics) {
+        lyrics.isNotEmpty() &&
+            !(lyrics.size == 1 && lyrics[0].text.contains("No embedded lyrics", ignoreCase = true))
+    }
+    var loadedRawText by remember(track.id, lyrics) {
+        mutableStateOf(
+            if (hasUsableLyrics) LyricsRepository.serializeLyricsToLrc(lyrics) else ""
+        )
+    }
+
+    LaunchedEffect(track.id, hasUsableLyrics, loadEditableLyrics) {
+        if (hasUsableLyrics && loadEditableLyrics != null) {
+            val loaded = loadEditableLyrics.invoke()
+            if (loaded.isNotBlank()) {
+                loadedRawText = loaded
+            }
+        }
+    }
+
+    Surface(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("dual_pane_lyrics_editor_pane"),
+        color = Color(0xEC14162A),
+        shape = OneUISquircleLarge,
+        border = BorderStroke(1.2.dp, accentColor.copy(alpha = 0.40f)),
+        shadowElevation = 14.dp
+    ) {
+        LyricsStudioPanelContent(
+            initialText = loadedRawText,
+            initialTab = initialTab,
+            hasExistingLyrics = hasUsableLyrics,
+            trackDurationMs = track.durationMs,
+            currentPositionMs = currentPositionMs,
+            primaryColor = accentColor,
+            onDismiss = onDismiss,
+            onSave = onSavePastedLyrics,
+            onPickFile = { lrcFilePickerLauncher.launch(arrayOf("*/*")) },
+            onClearLyrics = onClearLyrics,
+            trackSubtitle = "${track.title} • ${track.artist}",
+            textKey = track.id to lyrics,
+            tabRequestKey = tabRequestKey,
+            isDockedPane = true,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+@Composable
+fun LyricsStudioPanelContent(
+    initialText: String,
+    initialTab: LyricsEditorTab,
+    hasExistingLyrics: Boolean,
+    trackDurationMs: Long,
+    currentPositionMs: Long,
+    primaryColor: Color,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onPickFile: () -> Unit,
+    onClearLyrics: (() -> Unit)? = null,
+    trackSubtitle: String? = null,
+    textKey: Any = Unit,
+    tabRequestKey: Any = Unit,
+    isDockedPane: Boolean = false,
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
     var activeTab by remember { mutableStateOf(initialTab) }
-    var editorText by remember { mutableStateOf(initialText) }
+    LaunchedEffect(initialTab, tabRequestKey) {
+        activeTab = initialTab
+    }
+    var editorText by remember(textKey) { mutableStateOf(initialText) }
+    var userEdited by remember(textKey) { mutableStateOf(false) }
 
-    // Keep synced when initialText asynchronously loads (if user hasn't typed yet)
-    var initializedFromAsync by remember { mutableStateOf(initialText.isNotEmpty()) }
-    LaunchedEffect(initialText) {
-        if (!initializedFromAsync && initialText.isNotEmpty() && editorText.isEmpty()) {
+    LaunchedEffect(initialText, textKey) {
+        if (!userEdited && initialText.isNotEmpty() && editorText != initialText) {
             editorText = initialText
-            initializedFromAsync = true
         }
     }
 
@@ -413,285 +668,307 @@ fun LyricsEditorDialog(
         editorText.contains('[') || editorText.contains('<')
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .then(if (isDockedPane) Modifier.fillMaxHeight() else Modifier)
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Surface(
-            modifier = Modifier
-                .widthIn(max = 520.dp)
-                .fillMaxWidth(0.94f)
-                .heightIn(max = 680.dp)
-                .glassmorphism(
-                    shape = OneUISquircleLarge,
-                    backgroundColor = Color(0xF515172B),
-                    borderWidth = 1.2.dp,
-                    elevation = 16.dp
-                ),
-            color = Color.Transparent,
-            shape = OneUISquircleLarge
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Header
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (hasExistingLyrics) "Edit & Sync Lyrics" else "Add Lyrics",
-                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                        Text(
-                            text = "Supports plain text, [mm:ss.xx] LRC & <mm:ss.xx> word-sync",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0x99FFFFFF),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.testTag("close_lyrics_editor_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = Color(0xCCFFFFFF)
-                        )
-                    }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (hasExistingLyrics) "Edit & Sync Lyrics" else "Add Lyrics",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White
+                )
+                if (!trackSubtitle.isNullOrBlank()) {
+                    Text(
+                        text = trackSubtitle,
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = primaryColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
+                Text(
+                    text = "Supports plain text, [mm:ss.xx] LRC & <mm:ss.xx> word-sync",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0x99FFFFFF),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("close_lyrics_editor_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color(0xCCFFFFFF)
+                )
+            }
+        }
 
-                // Studio Mode Tabs
-                Row(
+        // Studio Mode Tabs
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(OneUIPillShape)
+                .background(Color(0x22FFFFFF))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            StudioTabPill(
+                label = "Paste & Edit",
+                icon = Icons.Default.Edit,
+                selected = activeTab == LyricsEditorTab.PASTE_EDIT,
+                primaryColor = primaryColor,
+                onClick = { activeTab = LyricsEditorTab.PASTE_EDIT },
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("lyrics_tab_paste_edit")
+            )
+            StudioTabPill(
+                label = "Tap-Sync Studio",
+                icon = Icons.Default.TouchApp,
+                selected = activeTab == LyricsEditorTab.TAP_SYNC,
+                primaryColor = primaryColor,
+                onClick = { activeTab = LyricsEditorTab.TAP_SYNC },
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("lyrics_tab_tap_sync")
+            )
+        }
+
+        // Tab Content
+        when (activeTab) {
+            LyricsEditorTab.PASTE_EDIT -> {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(OneUIPillShape)
-                        .background(Color(0x22FFFFFF))
-                        .padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        .then(if (isDockedPane) Modifier.weight(1f) else Modifier),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    StudioTabPill(
-                        label = "Paste & Edit",
-                        icon = Icons.Default.Edit,
-                        selected = activeTab == LyricsEditorTab.PASTE_EDIT,
-                        primaryColor = primaryColor,
-                        onClick = { activeTab = LyricsEditorTab.PASTE_EDIT },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("lyrics_tab_paste_edit")
-                    )
-                    StudioTabPill(
-                        label = "Tap-Sync Studio",
-                        icon = Icons.Default.TouchApp,
-                        selected = activeTab == LyricsEditorTab.TAP_SYNC,
-                        primaryColor = primaryColor,
-                        onClick = { activeTab = LyricsEditorTab.TAP_SYNC },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("lyrics_tab_tap_sync")
-                    )
-                }
-
-                // Tab Content
-                when (activeTab) {
-                    LyricsEditorTab.PASTE_EDIT -> {
-                        // Quick Tools Row
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            EditorActionChip(
-                                label = "Paste Clipboard",
-                                icon = Icons.Default.ContentPaste,
-                                accentColor = primaryColor,
-                                onClick = {
-                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                    val clip = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-                                    if (!clip.isNullOrBlank()) {
-                                        editorText = clip
-                                    }
-                                },
-                                modifier = Modifier.testTag("paste_clipboard_chip")
-                            )
-                            EditorActionChip(
-                                label = "Import File",
-                                icon = Icons.Default.UploadFile,
-                                accentColor = primaryColor,
-                                onClick = {
-                                    onDismiss()
-                                    onPickFile()
-                                },
-                                modifier = Modifier.testTag("dialog_import_lrc_chip")
-                            )
-                            if (hasAnyTimestamps) {
-                                EditorActionChip(
-                                    label = "-0.5s Sync",
-                                    icon = Icons.Default.Timer,
-                                    accentColor = primaryColor,
-                                    onClick = {
-                                        editorText = LyricsRepository.shiftLrcTimestamps(editorText, -500L)
-                                    },
-                                    modifier = Modifier.testTag("shift_back_chip")
-                                )
-                                EditorActionChip(
-                                    label = "+0.5s Sync",
-                                    icon = Icons.Default.Timer,
-                                    accentColor = primaryColor,
-                                    onClick = {
-                                        editorText = LyricsRepository.shiftLrcTimestamps(editorText, 500L)
-                                    },
-                                    modifier = Modifier.testTag("shift_forward_chip")
-                                )
-                            } else {
-                                EditorActionChip(
-                                    label = "Word-Sync Sample",
-                                    icon = Icons.Default.AutoAwesome,
-                                    accentColor = primaryColor,
-                                    onClick = {
-                                        editorText = "[00:02.00]<00:02.00>First <00:02.60>word <00:03.20>synced <00:03.80>line<00:04.50>\n" +
-                                            "[00:05.00]<00:05.00>Second <00:05.70>word <00:06.30>synced <00:07.00>line<00:07.80>"
-                                    },
-                                    modifier = Modifier.testTag("word_sync_sample_chip")
-                                )
-                            }
-                            if (editorText.isNotEmpty()) {
-                                EditorActionChip(
-                                    label = "Clear Text",
-                                    icon = Icons.Default.Clear,
-                                    accentColor = Color(0xFFFF8A80),
-                                    onClick = { editorText = "" },
-                                    modifier = Modifier.testTag("clear_editor_text_chip")
-                                )
-                            }
-                        }
-
-                        OutlinedTextField(
-                            value = editorText,
-                            onValueChange = { editorText = it },
-                            placeholder = {
-                                Text(
-                                    text = "[00:12.00] Line synced...\n" +
-                                        "[00:16.50]<00:16.50>Word <00:17.10>synced <00:17.80>line<00:18.40>",
-                                    color = Color(0x55FFFFFF),
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp
-                                )
-                            },
-                            textStyle = TextStyle(
-                                color = Color.White,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 13.sp,
-                                lineHeight = 19.sp
-                            ),
-                            minLines = 6,
-                            maxLines = 10,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = primaryColor,
-                                unfocusedBorderColor = Color(0x44FFFFFF),
-                                cursorColor = primaryColor
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("paste_lyrics_input")
-                        )
-
-                        // Live Parser Feedback
-                        if (editorText.isNotBlank()) {
-                            val syncedCount = parsedPreview.count { it.isSynced }
-                            val statusText = when {
-                                previewWordCount > 0 ->
-                                    "Detected: ${parsedPreview.size} lines • $previewWordCount word timestamps"
-                                syncedCount > 0 ->
-                                    "Detected: $syncedCount synced lines"
-                                else ->
-                                    "Detected: ${parsedPreview.size} plain lines (switch to Tap-Sync Studio to time them)"
-                            }
-                            val statusColor = when {
-                                previewWordCount > 0 -> Color(0xFF69F0AE)
-                                syncedCount > 0 -> primaryColor
-                                else -> Color(0xFFFFD54F)
-                            }
-                            Text(
-                                text = statusText,
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
-                                color = statusColor,
-                                modifier = Modifier.testTag("lyrics_parser_status")
-                            )
-                        }
-                    }
-
-                    LyricsEditorTab.TAP_SYNC -> {
-                        TapSyncStudioContent(
-                            rawText = editorText,
-                            currentPositionMs = currentPositionMs,
-                            primaryColor = primaryColor,
-                            onGeneratedLrc = { generated ->
-                                editorText = generated
-                            }
-                        )
-                    }
-                }
-
-                // Footer Actions
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (hasExistingLyrics && onClearLyrics != null) {
-                        TextButton(
-                            onClick = {
-                                onClearLyrics()
-                                onDismiss()
-                            },
-                            modifier = Modifier.testTag("dialog_clear_lyrics_button")
-                        ) {
-                            Text("Remove", color = Color(0xFFFF7A85), fontWeight = FontWeight.SemiBold)
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-
+                    // Quick Tools Row
                     Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        TextButton(onClick = onDismiss) {
-                            Text("Cancel", color = Color(0xCCFFFFFF))
-                        }
-                        Button(
+                        EditorActionChip(
+                            label = "Paste",
+                            icon = Icons.Default.ContentPaste,
+                            accentColor = primaryColor,
                             onClick = {
-                                if (editorText.isNotBlank()) {
-                                    onSave(editorText)
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                val clip = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                                if (!clip.isNullOrBlank()) {
+                                    userEdited = true
+                                    editorText = clip
                                 }
-                                onDismiss()
                             },
-                            enabled = editorText.isNotBlank(),
-                            shape = OneUIPillShape,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = primaryColor,
-                                contentColor = Color(0xFF0C0E1A)
-                            ),
-                            modifier = Modifier
-                                .heightIn(min = 44.dp)
-                                .testTag("save_pasted_lyrics_button")
-                        ) {
-                            Text("Save & Apply", fontWeight = FontWeight.Bold)
+                            modifier = Modifier.testTag("paste_clipboard_chip")
+                        )
+                        EditorActionChip(
+                            label = "Import File",
+                            icon = Icons.Default.UploadFile,
+                            accentColor = primaryColor,
+                            onClick = {
+                                userEdited = false
+                                if (!isDockedPane) {
+                                    onDismiss()
+                                }
+                                onPickFile()
+                            },
+                            modifier = Modifier.testTag("dialog_import_lrc_chip")
+                        )
+                        if (hasAnyTimestamps) {
+                            EditorActionChip(
+                                label = "-0.5s",
+                                icon = Icons.Default.Timer,
+                                accentColor = primaryColor,
+                                onClick = {
+                                    userEdited = true
+                                    editorText = LyricsRepository.shiftLrcTimestamps(editorText, -500L)
+                                },
+                                modifier = Modifier.testTag("shift_back_chip")
+                            )
+                            EditorActionChip(
+                                label = "+0.5s",
+                                icon = Icons.Default.Timer,
+                                accentColor = primaryColor,
+                                onClick = {
+                                    userEdited = true
+                                    editorText = LyricsRepository.shiftLrcTimestamps(editorText, 500L)
+                                },
+                                modifier = Modifier.testTag("shift_forward_chip")
+                            )
+                        } else {
+                            EditorActionChip(
+                                label = "Word-Sync Sample",
+                                icon = Icons.Default.AutoAwesome,
+                                accentColor = primaryColor,
+                                onClick = {
+                                    userEdited = true
+                                    editorText = "[00:02.00]<00:02.00>First <00:02.60>word <00:03.20>synced <00:03.80>line<00:04.50>\n" +
+                                        "[00:05.00]<00:05.00>Second <00:05.70>word <00:06.30>synced <00:07.00>line<00:07.80>"
+                                },
+                                modifier = Modifier.testTag("word_sync_sample_chip")
+                            )
+                        }
+                        if (editorText.isNotEmpty()) {
+                            EditorActionChip(
+                                label = "Clear",
+                                icon = Icons.Default.Clear,
+                                accentColor = Color(0xFFFF8A80),
+                                onClick = {
+                                    userEdited = true
+                                    editorText = ""
+                                },
+                                modifier = Modifier.testTag("clear_editor_text_chip")
+                            )
                         }
                     }
+
+                    OutlinedTextField(
+                        value = editorText,
+                        onValueChange = {
+                            userEdited = true
+                            editorText = it
+                        },
+                        placeholder = {
+                            Text(
+                                text = "[00:12.00] Line synced...\n" +
+                                    "[00:16.50]<00:16.50>Word <00:17.10>synced <00:17.80>line<00:18.40>",
+                                color = Color(0x55FFFFFF),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp
+                            )
+                        },
+                        textStyle = TextStyle(
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp
+                        ),
+                        minLines = if (isDockedPane) 4 else 6,
+                        maxLines = if (isDockedPane) Int.MAX_VALUE else 10,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedContainerColor = Color(0xFF0C0E1C),
+                            unfocusedContainerColor = Color(0xFF0C0E1C),
+                            focusedBorderColor = primaryColor,
+                            unfocusedBorderColor = Color(0x44FFFFFF),
+                            cursorColor = primaryColor
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(if (isDockedPane) Modifier.weight(1f) else Modifier)
+                            .testTag("paste_lyrics_input")
+                    )
+
+                    // Live Parser Feedback
+                    if (editorText.isNotBlank()) {
+                        val syncedCount = parsedPreview.count { it.isSynced }
+                        val statusText = when {
+                            previewWordCount > 0 ->
+                                "Detected: ${parsedPreview.size} lines • $previewWordCount word timestamps"
+                            syncedCount > 0 ->
+                                "Detected: $syncedCount synced lines"
+                            else ->
+                                "Detected: ${parsedPreview.size} plain lines (switch to Tap-Sync Studio to time them)"
+                        }
+                        val statusColor = when {
+                            previewWordCount > 0 -> Color(0xFF69F0AE)
+                            syncedCount > 0 -> primaryColor
+                            else -> Color(0xFFFFD54F)
+                        }
+                        Text(
+                            text = statusText,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                            color = statusColor,
+                            modifier = Modifier.testTag("lyrics_parser_status")
+                        )
+                    }
+                }
+            }
+
+            LyricsEditorTab.TAP_SYNC -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(if (isDockedPane) Modifier.weight(1f) else Modifier)
+                ) {
+                    TapSyncStudioContent(
+                        rawText = editorText,
+                        currentPositionMs = currentPositionMs,
+                        primaryColor = primaryColor,
+                        onGeneratedLrc = { generated ->
+                            userEdited = true
+                            editorText = generated
+                        }
+                    )
+                }
+            }
+        }
+
+        // Footer Actions
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (hasExistingLyrics && onClearLyrics != null) {
+                TextButton(
+                    onClick = {
+                        onClearLyrics()
+                        onDismiss()
+                    },
+                    modifier = Modifier.testTag("dialog_clear_lyrics_button")
+                ) {
+                    Text("Remove", color = Color(0xFFFF7A85), fontWeight = FontWeight.SemiBold)
+                }
+            } else {
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel", color = Color(0xCCFFFFFF))
+                }
+                Button(
+                    onClick = {
+                        if (editorText.isNotBlank()) {
+                            onSave(editorText)
+                        }
+                        onDismiss()
+                    },
+                    enabled = editorText.isNotBlank(),
+                    shape = OneUIPillShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = primaryColor,
+                        contentColor = Color(0xFF0C0E1A)
+                    ),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("save_pasted_lyrics_button")
+                ) {
+                    Text("Save & Apply", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -1023,7 +1300,7 @@ private fun StudioTabPill(
 ) {
     val bg by animateColorAsState(
         targetValue = if (selected) primaryColor else Color.Transparent,
-        animationSpec = tween(180),
+        animationSpec = MotionSpecs.snappySpring(),
         label = "studio_tab_bg"
     )
     val contentColor = if (selected) Color(0xFF0C0E1A) else Color.White
@@ -1031,7 +1308,7 @@ private fun StudioTabPill(
         modifier = modifier
             .clip(OneUIPillShape)
             .background(bg)
-            .clickable(onClick = onClick)
+            .bouncableClick(pressedScale = 0.95f, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
@@ -1062,16 +1339,21 @@ private fun EditorActionChip(
     modifier: Modifier = Modifier,
     selected: Boolean = false
 ) {
+    val chipBg by animateColorAsState(
+        targetValue = if (selected) accentColor.copy(alpha = 0.25f) else Color(0x1EFFFFFF),
+        animationSpec = MotionSpecs.snappySpring(),
+        label = "editor_chip_bg"
+    )
     Row(
         modifier = modifier
             .clip(OneUIPillShape)
-            .background(if (selected) accentColor.copy(alpha = 0.25f) else Color(0x1EFFFFFF))
+            .background(chipBg)
             .border(
                 width = 1.dp,
                 color = if (selected) accentColor else accentColor.copy(alpha = 0.45f),
                 shape = OneUIPillShape
             )
-            .clickable(onClick = onClick)
+            .bouncableClick(pressedScale = 0.94f, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp)

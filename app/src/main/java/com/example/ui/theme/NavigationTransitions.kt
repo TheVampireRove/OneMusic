@@ -4,16 +4,18 @@ import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.ui.unit.IntOffset
 
 /**
- * Shared Material 3-inspired navigation transition specs for hierarchical pages,
- * full-screen player sheet, top-level tab fade-through, and multi-layout posture shifts.
+ * Shared physics-based navigation transition specs backed by [MotionSpecs] springs
+ * for hierarchical pages, full-screen player sheet, top-level tab fade-through,
+ * and multi-layout foldable posture shifts.
  */
 object NavigationTransitions {
 
@@ -23,8 +25,8 @@ object NavigationTransitions {
     ): EnterTransition = with(scope) {
         slideIntoContainer(
             towards = AnimatedContentTransitionScope.SlideDirection.Start,
-            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)
-        ) + fadeIn(tween(durationMillis = 250))
+            animationSpec = MotionSpecs.expressiveSpring(visibilityThreshold = IntOffset.VisibilityThreshold)
+        ) + fadeIn(animationSpec = MotionSpecs.snappySpring())
     }
 
     fun <S> hierarchicalExit(
@@ -32,9 +34,9 @@ object NavigationTransitions {
     ): ExitTransition = with(scope) {
         slideOutOfContainer(
             towards = AnimatedContentTransitionScope.SlideDirection.Start,
-            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+            animationSpec = MotionSpecs.expressiveSpring(visibilityThreshold = IntOffset.VisibilityThreshold),
             targetOffset = { it / 4 }
-        ) + fadeOut(tween(durationMillis = 200))
+        ) + fadeOut(animationSpec = MotionSpecs.snappySpring())
     }
 
     fun <S> hierarchicalPopEnter(
@@ -42,9 +44,9 @@ object NavigationTransitions {
     ): EnterTransition = with(scope) {
         slideIntoContainer(
             towards = AnimatedContentTransitionScope.SlideDirection.End,
-            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+            animationSpec = MotionSpecs.expressiveSpring(visibilityThreshold = IntOffset.VisibilityThreshold),
             initialOffset = { it / 4 }
-        ) + fadeIn(tween(durationMillis = 250))
+        ) + fadeIn(animationSpec = MotionSpecs.snappySpring())
     }
 
     fun <S> hierarchicalPopExit(
@@ -52,8 +54,8 @@ object NavigationTransitions {
     ): ExitTransition = with(scope) {
         slideOutOfContainer(
             towards = AnimatedContentTransitionScope.SlideDirection.End,
-            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)
-        ) + fadeOut(tween(durationMillis = 200))
+            animationSpec = MotionSpecs.expressiveSpring(visibilityThreshold = IntOffset.VisibilityThreshold)
+        ) + fadeOut(animationSpec = MotionSpecs.snappySpring())
     }
 
     fun <S> hierarchicalContentTransform(
@@ -71,8 +73,8 @@ object NavigationTransitions {
     ): EnterTransition = with(scope) {
         slideIntoContainer(
             towards = AnimatedContentTransitionScope.SlideDirection.Up,
-            animationSpec = tween(durationMillis = 340, easing = FastOutSlowInEasing)
-        ) + fadeIn(tween(durationMillis = 260))
+            animationSpec = MotionSpecs.expressiveSpring(visibilityThreshold = IntOffset.VisibilityThreshold)
+        ) + fadeIn(animationSpec = MotionSpecs.expressiveSpring())
     }
 
     fun <S> playerSheetExit(
@@ -80,21 +82,28 @@ object NavigationTransitions {
     ): ExitTransition = with(scope) {
         slideOutOfContainer(
             towards = AnimatedContentTransitionScope.SlideDirection.Down,
-            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)
-        ) + fadeOut(tween(durationMillis = 220))
+            animationSpec = MotionSpecs.expressiveSpring(visibilityThreshold = IntOffset.VisibilityThreshold)
+        ) + fadeOut(animationSpec = MotionSpecs.snappySpring())
     }
 
     // 3. Top-Level Sibling Tab Fade-Through Transition
     fun tabFadeThrough(): ContentTransform =
-        (fadeIn(tween(durationMillis = 220, delayMillis = 50)) +
+        (fadeIn(animationSpec = MotionSpecs.snappySpring()) +
             scaleIn(
                 initialScale = 0.96f,
-                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                animationSpec = MotionSpecs.snappySpring()
             ))
-            .togetherWith(fadeOut(tween(durationMillis = 150)))
+            .togetherWith(
+                fadeOut(animationSpec = MotionSpecs.snappySpring()) +
+                    scaleOut(
+                        targetScale = 0.98f,
+                        animationSpec = MotionSpecs.snappySpring()
+                    )
+            )
 
     // 4. Smooth Layout Posture Transition (Cover <-> Dual-Pane <-> Tabletop)
     fun postureFade(): ContentTransform =
-        fadeIn(tween(durationMillis = 220, easing = FastOutSlowInEasing))
-            .togetherWith(fadeOut(tween(durationMillis = 160)))
+        (fadeIn(animationSpec = MotionSpecs.expressiveSpring()) +
+            scaleIn(initialScale = 0.98f, animationSpec = MotionSpecs.expressiveSpring()))
+            .togetherWith(fadeOut(animationSpec = MotionSpecs.snappySpring()))
 }

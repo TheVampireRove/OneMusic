@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -50,9 +52,12 @@ import androidx.compose.ui.unit.sp
 import com.example.model.AlbumArtSize
 import com.example.model.ElementColors
 import com.example.model.Track
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
 import com.example.ui.theme.OneUISquircleMedium
+import com.example.ui.theme.appSharedBounds
+import com.example.ui.theme.bouncableClick
 import com.example.ui.theme.glassmorphism
 import com.example.ui.theme.parseHexColor
 import kotlin.coroutines.cancellation.CancellationException
@@ -96,7 +101,7 @@ fun ArtistDetailScreen(
         modifier = modifier
             .fillMaxSize()
             .background(screenBg)
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
             .testTag("artist_detail_screen")
     ) {
         // Navigation bar
@@ -106,13 +111,14 @@ fun ArtistDetailScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(
-                onClick = onBack,
+            Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(48.dp)
                     .clip(CircleShape)
                     .background(Color(0x22FFFFFF))
-                    .testTag("artist_detail_back_button")
+                    .bouncableClick(onClick = onBack)
+                    .testTag("artist_detail_back_button"),
+                contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -156,7 +162,8 @@ fun ArtistDetailScreen(
                             size = 140.dp,
                             cornerRadius = 70.dp, // circular artist avatar
                             isPlaying = isPlaying && currentTrack.artist == artistName,
-                            showVinylPeek = false
+                            showVinylPeek = false,
+                            artSharedElementKey = "artist_art_$artistName"
                         )
 
                         Spacer(modifier = Modifier.height(14.dp))
@@ -166,7 +173,11 @@ fun ArtistDetailScreen(
                             style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
                             color = Color.White,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.appSharedBounds(
+                                key = "artist_title_$artistName",
+                                useScaleToBounds = true
+                            )
                         )
 
                         Text(
@@ -188,7 +199,7 @@ fun ArtistDetailScreen(
                                     .weight(1f)
                                     .clip(OneUIPillShape)
                                     .background(accentColor)
-                                    .clickable {
+                                    .bouncableClick {
                                         if (tracks.isNotEmpty()) {
                                             onPlayFromContext(tracks, 0)
                                         }
@@ -218,7 +229,7 @@ fun ArtistDetailScreen(
                                     .weight(1f)
                                     .clip(OneUIPillShape)
                                     .background(Color(0x25FFFFFF))
-                                    .clickable {
+                                    .bouncableClick {
                                         if (tracks.isNotEmpty()) {
                                             onShuffleFromContext(tracks)
                                         }
@@ -269,13 +280,18 @@ fun ArtistDetailScreen(
                             val albumLead = albumTracks.first()
                             Box(
                                 modifier = Modifier
+                                    .animateItem(
+                                        fadeInSpec = MotionSpecs.snappySpring(),
+                                        placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                                        fadeOutSpec = MotionSpecs.snappySpring()
+                                    )
                                     .width(135.dp)
+                                    .bouncableClick { onSelectAlbum(albumName) }
                                     .glassmorphism(
                                         shape = OneUISquircleMedium,
                                         backgroundColor = Color(0x2B21243E),
                                         borderWidth = 1.dp
                                     )
-                                    .clickable { onSelectAlbum(albumName) }
                                     .padding(10.dp)
                                     .testTag("artist_album_${albumName.lowercase().replace(" ", "_")}")
                             ) {
@@ -285,7 +301,8 @@ fun ArtistDetailScreen(
                                         size = 115.dp,
                                         cornerRadius = 18.dp,
                                         isPlaying = isPlaying && currentTrack.album == albumName,
-                                        showVinylPeek = false
+                                        showVinylPeek = false,
+                                        artSharedElementKey = "album_art_$albumName"
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text(
@@ -329,7 +346,12 @@ fun ArtistDetailScreen(
                     onTrackClick = { onPlayFromContext(tracks, index) },
                     onToggleFavorite = { onToggleFavorite(track) },
                     albumArtSize = albumArtSize,
-                    elementColors = elementColors
+                    elementColors = elementColors,
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = MotionSpecs.snappySpring(),
+                        placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                        fadeOutSpec = MotionSpecs.snappySpring()
+                    )
                 )
             }
         }

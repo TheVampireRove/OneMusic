@@ -27,24 +27,29 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.FolderOpen
@@ -55,6 +60,7 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.SmartDisplay
@@ -71,10 +77,14 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -83,7 +93,9 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
+import com.example.viewmodel.ImportSummaryBanner
 import com.example.viewmodel.LyricsSyncUiState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -99,6 +111,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
+import com.example.data.AnimatedArtRepository
 import com.example.diagnostics.CrashDiagnosticsPreferences
 import com.example.diagnostics.CrashReportManager
 import com.example.ui.diagnostics.CrashReportsScreen
@@ -111,6 +124,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -142,6 +156,7 @@ import com.example.model.TabletopControlPositions
 import com.example.model.TabletopControlStyle
 import com.example.model.TabletopAlbumArtSize
 import com.example.model.TabletopTopLayout
+import com.example.model.Track
 import com.example.model.VisualizerStyle
 import com.example.ui.components.ExpressiveScrubber
 import com.example.ui.components.OneUITooltipButton
@@ -227,6 +242,13 @@ fun SettingsScreen(
     totalTracksCount: Int = 0,
     onPickLocalFiles: () -> Unit = {},
     onScanDeviceStorage: () -> Unit = {},
+    localTracks: List<Track> = emptyList(),
+    duplicateTracksCount: Int = 0,
+    recentImportBanner: ImportSummaryBanner? = null,
+    onUndoLastImport: () -> Unit = {},
+    onRemoveLocalTrack: (String) -> Unit = {},
+    onRemoveDuplicateTracks: () -> Unit = {},
+    onClearFilePickedImports: () -> Unit = {},
     lyricsSyncUiState: LyricsSyncUiState = LyricsSyncUiState(),
     onStartBatchLyricsSync: () -> Unit = {},
     onCancelBatchLyricsSync: () -> Unit = {},
@@ -344,8 +366,7 @@ fun SettingsScreen(
         modifier = modifier
             .fillMaxSize()
             .background(settingsBg)
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
     ) {
         val isDualPane = when (settings.dualPaneMode) {
             DualPaneSetting.AUTO -> maxWidth >= 600.dp || hasVerticalHinge
@@ -516,21 +537,6 @@ fun SettingsScreen(
 
                 // RIGHT PANE: Dynamic Detail Studio
                 val activeScrollState = detailScrollStates.getValue(activeDetailCategory)
-                val statusBadgeText = remember(
-                    activeDetailCategory,
-                    settings,
-                    localTracksCount,
-                    totalTracksCount,
-                    isCrashLoggingEnabled
-                ) {
-                    categoryStatusSummary(
-                        category = activeDetailCategory,
-                        settings = settings,
-                        localTracksCount = localTracksCount,
-                        totalTracksCount = totalTracksCount,
-                        isCrashLoggingEnabled = isCrashLoggingEnabled
-                    )
-                }
 
                 Column(
                     modifier = Modifier
@@ -543,7 +549,7 @@ fun SettingsScreen(
                         )
                         .testTag("settings_detail_pane")
                 ) {
-                    // Persistent Detail Context Header
+                    // Persistent Detail Context Header (clean full-width title & subtitle without status bubble overlap)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -580,29 +586,9 @@ fun SettingsScreen(
                                 text = activeDetailCategory.subtitle,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = settingsTextColor.copy(alpha = 0.65f),
-                                maxLines = 1,
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
-                        }
-
-                        if (availableRowWidth >= 660.dp) {
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(OneUIPillShape)
-                                    .background(accentColor.copy(alpha = 0.16f))
-                                    .border(1.dp, accentColor.copy(alpha = 0.35f), OneUIPillShape)
-                                    .padding(horizontal = 10.dp, vertical = 5.dp)
-                                    .testTag("settings_detail_status_pill")
-                            ) {
-                                Text(
-                                    text = statusBadgeText,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = accentColor,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
                         }
                     }
 
@@ -644,6 +630,13 @@ fun SettingsScreen(
                                     totalTracksCount = totalTracksCount,
                                     onPickLocalFiles = onPickLocalFiles,
                                     onScanDeviceStorage = onScanDeviceStorage,
+                                    localTracks = localTracks,
+                                    duplicateTracksCount = duplicateTracksCount,
+                                    recentImportBanner = recentImportBanner,
+                                    onUndoLastImport = onUndoLastImport,
+                                    onRemoveLocalTrack = onRemoveLocalTrack,
+                                    onRemoveDuplicateTracks = onRemoveDuplicateTracks,
+                                    onClearFilePickedImports = onClearFilePickedImports,
                                     isCrashLoggingEnabled = isCrashLoggingEnabled,
                                     onToggleCrashLogging = { enabled ->
                                         coroutineScope.launch {
@@ -787,6 +780,13 @@ fun SettingsScreen(
                                 totalTracksCount = totalTracksCount,
                                 onPickLocalFiles = onPickLocalFiles,
                                 onScanDeviceStorage = onScanDeviceStorage,
+                                localTracks = localTracks,
+                                duplicateTracksCount = duplicateTracksCount,
+                                recentImportBanner = recentImportBanner,
+                                onUndoLastImport = onUndoLastImport,
+                                onRemoveLocalTrack = onRemoveLocalTrack,
+                                onRemoveDuplicateTracks = onRemoveDuplicateTracks,
+                                onClearFilePickedImports = onClearFilePickedImports,
                                 isCrashLoggingEnabled = isCrashLoggingEnabled,
                                 onToggleCrashLogging = { enabled ->
                                     coroutineScope.launch {
@@ -806,42 +806,6 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(32.dp))
             }
         }
-    }
-}
-
-private fun categoryStatusSummary(
-    category: SettingsCategory,
-    settings: AppSettings,
-    localTracksCount: Int,
-    totalTracksCount: Int,
-    isCrashLoggingEnabled: Boolean
-): String {
-    return when (category) {
-        SettingsCategory.THEME_COLORS -> if (!settings.dynamicThemeEnabled) {
-            settings.accentTheme.displayName
-        } else {
-            when (settings.themeEngine) {
-                DynamicThemeEngine.ANDROID_17_MONET -> "Monet Engine"
-                DynamicThemeEngine.TRACK_ALBUM_ART -> "Artwork Sync"
-                DynamicThemeEngine.CUSTOM_HEX -> settings.customHexColor.uppercase()
-                DynamicThemeEngine.INDIVIDUAL_ELEMENTS -> "Custom Elements"
-                DynamicThemeEngine.STATIC_ACCENT -> settings.accentTheme.displayName
-            }
-        }
-        SettingsCategory.PLAYER_VISUALIZER -> settings.visualizerStyle.label
-        SettingsCategory.LYRICS -> if (settings.autoFetchLyricsOnScan) {
-            "Auto-Fetch On"
-        } else if (settings.lyricsSyncWifiOnly) {
-            "Wi-Fi Only"
-        } else {
-            "Manual Sync"
-        }
-        SettingsCategory.TABLETOP_FOLDABLE -> settings.tabletopControlStyle.label
-        SettingsCategory.DISPLAY_LAYOUT -> "Dual-Pane: ${settings.dualPaneMode.label}"
-        SettingsCategory.AUDIO_ENGINE -> settings.defaultSoundPreset.displayName
-        SettingsCategory.DEVICE_AUDIO -> "$localTracksCount Local / $totalTracksCount Total"
-        SettingsCategory.CAR_ABOUT -> "Android Auto Ready"
-        SettingsCategory.DIAGNOSTICS -> if (isCrashLoggingEnabled) "Interceptor Active" else "Capture Paused"
     }
 }
 
@@ -1026,6 +990,13 @@ private fun SettingsCategoryContent(
     totalTracksCount: Int,
     onPickLocalFiles: () -> Unit,
     onScanDeviceStorage: () -> Unit,
+    localTracks: List<Track>,
+    duplicateTracksCount: Int,
+    recentImportBanner: ImportSummaryBanner?,
+    onUndoLastImport: () -> Unit,
+    onRemoveLocalTrack: (String) -> Unit,
+    onRemoveDuplicateTracks: () -> Unit,
+    onClearFilePickedImports: () -> Unit,
     isCrashLoggingEnabled: Boolean,
     onToggleCrashLogging: (Boolean) -> Unit,
     onOpenCrashReports: () -> Unit,
@@ -2023,6 +1994,15 @@ private fun SettingsCategoryContent(
 
                 // Visualizer Style Selection (Synced across Tabletop, Dual Pane & Cover Screen)
                 VisualizerStyleSelector(
+                    settings = settings,
+                    accentColor = accentColor,
+                    onUpdateSettings = onUpdateSettings
+                )
+
+                HorizontalDivider(color = Color(0x1AFFFFFF))
+
+                // Animated Album Covers Pipeline Controls
+                AnimatedCoversSettingsSection(
                     settings = settings,
                     accentColor = accentColor,
                     onUpdateSettings = onUpdateSettings
@@ -3232,6 +3212,155 @@ private fun SettingsCategoryContent(
                                     color = Color.White
                                 )
                             }
+                        }
+                    }
+
+                    val filePickedCount = remember(localTracks) {
+                        localTracks.count { it.id.startsWith("local_") }
+                    }
+                    var showManageImportsDialog by remember { mutableStateOf(false) }
+
+                    if (showManageImportsDialog) {
+                        ManageImportedAudioDialog(
+                            localTracks = localTracks,
+                            duplicateTracksCount = duplicateTracksCount,
+                            accentColor = accentColor,
+                            onRemoveTrack = onRemoveLocalTrack,
+                            onRemoveDuplicates = onRemoveDuplicateTracks,
+                            onClearFilePickedImports = onClearFilePickedImports,
+                            onDismiss = { showManageImportsDialog = false }
+                        )
+                    }
+
+                    // Undo recent import or manage/delete imported & duplicate tracks
+                    if (recentImportBanner != null && recentImportBanner.importedTrackIds.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(OneUIPillShape)
+                                .background(accentColor.copy(alpha = 0.16f))
+                                .border(1.dp, accentColor.copy(alpha = 0.45f), OneUIPillShape)
+                                .clickable(onClick = onUndoLastImport)
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                                .testTag("settings_undo_import_button"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Undo,
+                                    contentDescription = "Undo Import",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "Undo Last Import (${recentImportBanner.importedTrackIds.size})",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = recentImportBanner.summaryLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xBBFFFFFF),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Undo",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = accentColor
+                            )
+                        }
+                    }
+
+                    if (duplicateTracksCount > 0) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(OneUIPillShape)
+                                .background(Color(0x24FFAB40))
+                                .border(1.dp, Color(0x66FFAB40), OneUIPillShape)
+                                .clickable(onClick = onRemoveDuplicateTracks)
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                                .testTag("settings_remove_duplicates_button"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CleaningServices,
+                                contentDescription = "Remove Duplicates",
+                                tint = Color(0xFFFFCA28),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Remove $duplicateTracksCount Duplicate Track${if (duplicateTracksCount == 1) "" else "s"}",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Consolidate tracks imported both via File Picker and Storage Scan",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xBBFFFFFF)
+                                )
+                            }
+                        }
+                    }
+
+                    if (localTracks.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(OneUIPillShape)
+                                .background(Color(0x18FFFFFF))
+                                .border(1.dp, Color(0x2BFFFFFF), OneUIPillShape)
+                                .clickable { showManageImportsDialog = true }
+                                .padding(horizontal = 14.dp, vertical = 11.dp)
+                                .testTag("settings_manage_imported_audio_button"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteSweep,
+                                    contentDescription = "Manage Imported Audio",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "Manage Imported & Local Audio",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "$filePickedCount file-picked • ${localTracks.size - filePickedCount} storage-scanned • Delete individual imports",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xAAFFFFFF)
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
                 }
@@ -4852,7 +4981,9 @@ private fun DiagnosticsSettingsCategoryContent(
                             Text(
                                 text = "$savedReportsCount ${if (savedReportsCount == 1) "File" else "Files"}",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                color = Color(0xFF0C0E1A)
+                                color = Color(0xFF0C0E1A),
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
@@ -4873,7 +5004,7 @@ private fun DiagnosticsSettingsCategoryContent(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(OneUIPillShape)
+                        .clip(OneUISquircleMedium)
                         .background(Color(0x1AFFFFFF))
                         .clickable {
                             CrashReportManager.generateTestReport(context)
@@ -4884,30 +5015,38 @@ private fun DiagnosticsSettingsCategoryContent(
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
                         }
-                        .padding(horizontal = 16.dp, vertical = 11.dp)
+                        .padding(horizontal = 16.dp, vertical = 13.dp)
                         .testTag("settings_btn_simulate_crash_report"),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x22FFFFFF)),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = null,
                             tint = Color.White,
                             modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "Simulate Diagnostic Crash Report",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = Color.White
                         )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Create Test Log — verify crash capture & file export",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = accentColor
+                        )
                     }
-                    Text(
-                        text = "Create Test Log",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = accentColor
-                    )
                 }
             }
         }
@@ -4950,14 +5089,17 @@ private fun DiagnosticsSettingsCategoryContent(
                         Text(
                             text = label,
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0x99FFFFFF)
+                            color = Color(0x99FFFFFF),
+                            modifier = Modifier.padding(end = 12.dp)
                         )
                         Text(
                             text = value,
                             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
                             color = if (label == "Interceptor Status") {
                                 if (isCrashLoggingEnabled) accentColor else Color(0xFFFF5252)
-                            } else Color.White
+                            } else Color.White,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                     }
                     if (index < telemetryItems.lastIndex) {
@@ -4968,5 +5110,451 @@ private fun DiagnosticsSettingsCategoryContent(
         }
     }
 }
+
+@Composable
+private fun AnimatedCoversSettingsSection(
+    settings: AppSettings,
+    accentColor: Color,
+    onUpdateSettings: ((AppSettings) -> AppSettings) -> Unit
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val cacheVersion by AnimatedArtRepository.cacheVersion.collectAsState()
+    val (cachedFileCount, cachedTotalBytes) = remember(cacheVersion) {
+        AnimatedArtRepository.getCacheStats(context)
+    }
+    var lastClearedMessage by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier = Modifier.padding(16.dp)) {
+        Text(
+            text = "Animated Album Covers",
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = Color.White
+        )
+        Text(
+            text = "Supports looping .mp4/.webm video loops, animated .webp/.gif covers, side-car files, and subtle living motion on static artwork",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0x99FFFFFF)
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 1. Enable Animated Album Covers
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(OneUISquircleSmall)
+                .clickable {
+                    onUpdateSettings { it.copy(enableAnimatedCovers = !settings.enableAnimatedCovers) }
+                }
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Enable Animated Album Covers",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Render animated covers and motion artwork across Now Playing, Dual-Pane & Tabletop",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0x99FFFFFF)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = settings.enableAnimatedCovers,
+                onCheckedChange = { checked ->
+                    onUpdateSettings { it.copy(enableAnimatedCovers = checked) }
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = accentColor,
+                    uncheckedThumbColor = Color(0xFF888888),
+                    uncheckedTrackColor = Color(0x33FFFFFF)
+                ),
+                modifier = Modifier.testTag("settings_enable_animated_covers_switch")
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+        HorizontalDivider(color = Color(0x14FFFFFF))
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 2. Auto-Fetch Covers Over Wi-Fi
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(OneUISquircleSmall)
+                .clickable {
+                    onUpdateSettings {
+                        it.copy(autoFetchAnimatedCoversWifiOnly = !settings.autoFetchAnimatedCoversWifiOnly)
+                    }
+                }
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Auto-Fetch Covers Over Wi-Fi",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Automatically fetch & cache remote animated or HD album covers only on Wi-Fi/Ethernet",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0x99FFFFFF)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = settings.autoFetchAnimatedCoversWifiOnly,
+                onCheckedChange = { checked ->
+                    onUpdateSettings { it.copy(autoFetchAnimatedCoversWifiOnly = checked) }
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = accentColor,
+                    uncheckedThumbColor = Color(0xFF888888),
+                    uncheckedTrackColor = Color(0x33FFFFFF)
+                ),
+                modifier = Modifier.testTag("settings_wifi_only_animated_covers_switch")
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+        HorizontalDivider(color = Color(0x14FFFFFF))
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 3. Subtle Motion Effect on Static Covers
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(OneUISquircleSmall)
+                .clickable {
+                    onUpdateSettings {
+                        it.copy(simulateMotionOnStaticCovers = !settings.simulateMotionOnStaticCovers)
+                    }
+                }
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Subtle Motion Effect on Static Covers",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Living Artwork Ken Burns breathe, parallax & specular shimmer on standard covers",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0x99FFFFFF)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = settings.simulateMotionOnStaticCovers,
+                onCheckedChange = { checked ->
+                    onUpdateSettings { it.copy(simulateMotionOnStaticCovers = checked) }
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = accentColor,
+                    uncheckedThumbColor = Color(0xFF888888),
+                    uncheckedTrackColor = Color(0x33FFFFFF)
+                ),
+                modifier = Modifier.testTag("settings_living_motion_static_covers_switch")
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        HorizontalDivider(color = Color(0x14FFFFFF))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 4. Clear Animated Cover Cache Button
+        val sizeText = when {
+            cachedTotalBytes >= 1024L * 1024L ->
+                String.format(java.util.Locale.US, "%.1f MB", cachedTotalBytes / (1024f * 1024f))
+            cachedTotalBytes > 0L ->
+                "${(cachedTotalBytes / 1024L).coerceAtLeast(1L)} KB"
+            else -> "0 KB"
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(OneUIPillShape)
+                .background(Color(0x18FFFFFF))
+                .border(1.dp, accentColor.copy(alpha = 0.45f), OneUIPillShape)
+                .clickable {
+                    coroutineScope.launch {
+                        val cleared = AnimatedArtRepository.clearCache(context)
+                        lastClearedMessage = if (cleared > 0) {
+                            "Cleared $cleared cached animated cover file(s)"
+                        } else {
+                            "Animated cover cache is already empty"
+                        }
+                    }
+                }
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .testTag("settings_clear_animated_cover_cache_btn"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = "Clear Animated Cover Cache",
+                    tint = accentColor,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "Clear Animated Cover Cache",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White
+                    )
+                    Text(
+                        text = lastClearedMessage
+                            ?: "$cachedFileCount cached file(s) • $sizeText used",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0x99FFFFFF)
+                    )
+                }
+            }
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = null,
+                tint = accentColor,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ManageImportedAudioDialog(
+    localTracks: List<Track>,
+    duplicateTracksCount: Int,
+    accentColor: Color,
+    onRemoveTrack: (String) -> Unit,
+    onRemoveDuplicates: () -> Unit,
+    onClearFilePickedImports: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var searchText by remember { mutableStateOf("") }
+    var showOnlyFilePicked by remember { mutableStateOf(localTracks.any { it.id.startsWith("local_") }) }
+
+    val filePickedCount = remember(localTracks) { localTracks.count { it.id.startsWith("local_") } }
+    val filteredTracks = remember(localTracks, searchText, showOnlyFilePicked) {
+        localTracks
+            .filter { if (showOnlyFilePicked) it.id.startsWith("local_") else true }
+            .filter {
+                searchText.isBlank() ||
+                    it.title.contains(searchText, ignoreCase = true) ||
+                    it.artist.contains(searchText, ignoreCase = true) ||
+                    it.album.contains(searchText, ignoreCase = true)
+            }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF141628),
+        shape = OneUISquircleLarge,
+        title = {
+            Column {
+                Text(
+                    text = "Manage Imported Audio",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White
+                )
+                Text(
+                    text = "${localTracks.size} local tracks ($filePickedCount file-picked)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0x99FFFFFF)
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(OneUIPillShape)
+                            .background(if (showOnlyFilePicked) accentColor else Color(0x1CFFFFFF))
+                            .clickable { showOnlyFilePicked = true }
+                            .padding(vertical = 8.dp)
+                            .testTag("manage_filter_file_picked"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "File-Picked ($filePickedCount)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = if (showOnlyFilePicked) Color(0xFF0C0E1A) else Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(OneUIPillShape)
+                            .background(if (!showOnlyFilePicked) accentColor else Color(0x1CFFFFFF))
+                            .clickable { showOnlyFilePicked = false }
+                            .padding(vertical = 8.dp)
+                            .testTag("manage_filter_all_local"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "All Local (${localTracks.size})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = if (!showOnlyFilePicked) Color(0xFF0C0E1A) else Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                if (duplicateTracksCount > 0) {
+                    Button(
+                        onClick = onRemoveDuplicates,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0x33FFCA28),
+                            contentColor = Color(0xFFFFCA28)
+                        ),
+                        shape = OneUIPillShape,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("manage_dialog_remove_duplicates")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CleaningServices,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Merge & Remove $duplicateTracksCount Duplicate(s)",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = searchText,
+                    onValueChange = { searchText = it },
+                    singleLine = true,
+                    placeholder = {
+                        Text("Filter by title, artist, album", color = Color(0x77FFFFFF), style = MaterialTheme.typography.bodySmall)
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = accentColor,
+                        unfocusedBorderColor = Color(0x33FFFFFF),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (filteredTracks.isEmpty()) {
+                    Text(
+                        text = if (showOnlyFilePicked) {
+                            "No file-picked imports in your library."
+                        } else {
+                            "No matching local tracks found."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0x99FFFFFF),
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(250.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredTracks, key = { it.id }) { track ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(OneUISquircleSmall)
+                                    .background(Color(0x16FFFFFF))
+                                    .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = track.title,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${track.artist} • ${if (track.id.startsWith("local_")) "File Import" else "Storage Scan"}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0x99FFFFFF),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onRemoveTrack(track.id) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("delete_imported_track_${track.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "Remove ${track.title}",
+                                        tint = Color(0xFFFF8A80)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (filePickedCount > 0) {
+                TextButton(
+                    onClick = onClearFilePickedImports,
+                    modifier = Modifier.testTag("manage_clear_all_file_imports")
+                ) {
+                    Text("Clear File Imports", color = Color(0xFFFF8A80))
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done", color = accentColor)
+            }
+        }
+    )
+}
+
 
 

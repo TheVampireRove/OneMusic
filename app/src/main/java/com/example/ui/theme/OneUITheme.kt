@@ -58,9 +58,9 @@ fun rememberAnimatedExpressivePalette(
     secondaryTarget: Color,
     accentTarget: Color
 ): ExpressivePalette {
-    val primary by animateColorAsState(primaryTarget, animationSpec = tween(700), label = "primary")
-    val secondary by animateColorAsState(secondaryTarget, animationSpec = tween(700), label = "secondary")
-    val accent by animateColorAsState(accentTarget, animationSpec = tween(700), label = "accent")
+    val primary by animateColorAsState(primaryTarget, animationSpec = MotionSpecs.expressiveSpring(), label = "primary")
+    val secondary by animateColorAsState(secondaryTarget, animationSpec = MotionSpecs.expressiveSpring(), label = "secondary")
+    val accent by animateColorAsState(accentTarget, animationSpec = MotionSpecs.expressiveSpring(), label = "accent")
 
     return ExpressivePalette(
         primary = primary,

@@ -12,6 +12,8 @@ import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -81,35 +83,51 @@ class OneMusicAutoService : MediaLibraryService() {
         createNotificationChannel()
         try {
             playbackManager.initContext(this)
-
-            val player = playbackManager.audioEngine.exoPlayer
-            if (player != null) {
-                val intent = Intent(this, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    putExtra("OPEN_NOW_PLAYING", true)
-                }
-                val pendingIntent = PendingIntent.getActivity(
-                    this,
-                    0,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibrarySessionCallback())
-                    .setSessionActivity(pendingIntent)
-                    .setId("OneMusicAutoSession")
-                    .build()
-
-                observePlaybackState()
-            }
+            playbackManager.ensureActivePlayer()
+            ensureMediaLibrarySession()
+            observePlaybackState()
         } catch (_: Exception) {
         } finally {
             publishOngoingNotification()
         }
     }
 
+    internal fun ensureMediaLibrarySession(): MediaLibrarySession? {
+        playbackManager.initContext(this)
+        val livePlayer = playbackManager.audioEngine.exoPlayer ?: return mediaLibrarySession
+        val existingSession = mediaLibrarySession
+        if (existingSession != null) {
+            val wrapped = (existingSession.player as? SessionForwardingPlayer)?.basePlayer
+            if (wrapped !== livePlayer) {
+                existingSession.player = SessionForwardingPlayer(livePlayer)
+            }
+            return existingSession
+        }
+
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("OPEN_NOW_PLAYING", true)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return MediaLibrarySession.Builder(
+            this,
+            SessionForwardingPlayer(livePlayer),
+            LibrarySessionCallback()
+        )
+            .setSessionActivity(pendingIntent)
+            .setId("OneMusicAutoSession")
+            .build()
+            .also { mediaLibrarySession = it }
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
-        return mediaLibrarySession
+        return ensureMediaLibrarySession()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -182,8 +200,11 @@ class OneMusicAutoService : MediaLibraryService() {
                 startForeground(NOTIFICATION_ID, notif)
             }
         } catch (_: Exception) {
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, notif)
+            try {
+                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.notify(NOTIFICATION_ID, notif)
+            } catch (_: SecurityException) {
+            } catch (_: Exception) {}
         }
     }
 
@@ -296,6 +317,14 @@ class OneMusicAutoService : MediaLibraryService() {
             browser: MediaSession.ControllerInfo,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<MediaItem>> {
+            val extras = Bundle().apply {
+                putBoolean("android.media.browse.CONTENT_STYLE_SUPPORTED", true)
+                putInt("android.media.browse.CONTENT_STYLE_BROWSABLE_HINT", 1)
+                putInt("android.media.browse.CONTENT_STYLE_PLAYABLE_HINT", 1)
+            }
+            val rootParams = LibraryParams.Builder()
+                .setExtras(extras)
+                .build()
             val rootItem = MediaItem.Builder()
                 .setMediaId(ROOT_ID)
                 .setMediaMetadata(
@@ -303,10 +332,11 @@ class OneMusicAutoService : MediaLibraryService() {
                         .setTitle("OneMusic")
                         .setIsBrowsable(true)
                         .setIsPlayable(false)
+                        .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
                         .build()
                 )
                 .build()
-            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params))
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params ?: rootParams))
         }
 
         override fun onGetChildren(
@@ -317,64 +347,7 @@ class OneMusicAutoService : MediaLibraryService() {
             pageSize: Int,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
-            val items = mutableListOf<MediaItem>()
-            val tracks = playbackManager.repository.tracks.value
-            val playlists = playbackManager.repository.playlists.value
-
-            when (parentId) {
-                ROOT_ID -> {
-                    items.add(createCategoryItem(MEDIA_ID_TRACKS, "All Tracks", "${tracks.size} songs"))
-                    items.add(createCategoryItem(MEDIA_ID_FAVORITES, "Favorites", "${tracks.count { it.isFavorite }} saved tracks"))
-                    items.add(createCategoryItem(MEDIA_ID_ALBUMS, "Albums", "${tracks.map { it.album }.distinct().size} albums"))
-                    items.add(createCategoryItem(MEDIA_ID_PLAYLISTS, "Playlists", "${playlists.size} playlists"))
-                }
-
-                MEDIA_ID_TRACKS -> {
-                    tracks.forEach { items.add(playbackManager.trackToMediaItem(it)) }
-                }
-
-                MEDIA_ID_FAVORITES -> {
-                    tracks.filter { it.isFavorite }.forEach { items.add(playbackManager.trackToMediaItem(it)) }
-                }
-
-                MEDIA_ID_ALBUMS -> {
-                    val albums = tracks.groupBy { it.album }
-                    albums.forEach { (albumName, albumTracks) ->
-                        val artist = albumTracks.firstOrNull()?.artist ?: "Artist"
-                        items.add(createCategoryItem("album_$albumName", albumName, "$artist • ${albumTracks.size} tracks"))
-                    }
-                }
-
-                MEDIA_ID_PLAYLISTS -> {
-                    playlists.forEach { playlist ->
-                        items.add(
-                            createCategoryItem(
-                                "playlist_${playlist.id}",
-                                playlist.title,
-                                "${playlist.trackIds.size} songs • ${playlist.description}"
-                            )
-                        )
-                    }
-                }
-
-                else -> {
-                    if (parentId.startsWith("album_")) {
-                        val albumName = parentId.removePrefix("album_")
-                        tracks.filter { it.album == albumName }.forEach {
-                            items.add(playbackManager.trackToMediaItem(it))
-                        }
-                    } else if (parentId.startsWith("playlist_")) {
-                        val playlistId = parentId.removePrefix("playlist_")
-                        val playlist = playlists.find { it.id == playlistId }
-                        if (playlist != null) {
-                            tracks.filter { playlist.trackIds.contains(it.id) }.forEach {
-                                items.add(playbackManager.trackToMediaItem(it))
-                            }
-                        }
-                    }
-                }
-            }
-
+            val items = buildChildrenPage(parentId, page, pageSize)
             return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.copyOf(items), params))
         }
 
@@ -385,10 +358,36 @@ class OneMusicAutoService : MediaLibraryService() {
         ): ListenableFuture<LibraryResult<MediaItem>> {
             val track = playbackManager.repository.tracks.value.find { it.id == mediaId }
             return if (track != null) {
-                Futures.immediateFuture(LibraryResult.ofItem(playbackManager.trackToMediaItem(track), null))
+                Futures.immediateFuture(LibraryResult.ofItem(playbackManager.trackToBrowseMediaItem(track), null))
             } else {
                 Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
             }
+        }
+
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<Void>> {
+            val count = findMatchingTracks(query).size
+            session.notifySearchResultChanged(browser, query, count, params)
+            return Futures.immediateFuture(LibraryResult.ofVoid(params))
+        }
+
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            val matches = findMatchingTracks(query)
+            val paged = paginateList(matches, page, pageSize).map {
+                playbackManager.trackToBrowseMediaItem(it)
+            }
+            return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.copyOf(paged), params))
         }
 
         override fun onAddMediaItems(
@@ -396,15 +395,12 @@ class OneMusicAutoService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
-            val updated = mediaItems.map { item ->
-                val track = playbackManager.repository.tracks.value.find { it.id == item.mediaId }
-                if (track != null) {
-                    playbackManager.trackToMediaItem(track)
-                } else {
-                    item
-                }
+            val allTracks = playbackManager.repository.tracks.value
+            val byId = allTracks.associateBy { it.id }
+            val resolved = mediaItems.flatMap { item ->
+                resolvePlayableItemsForRequest(item, byId, allTracks)
             }.toMutableList()
-            return Futures.immediateFuture(updated)
+            return Futures.immediateFuture(resolved)
         }
 
         override fun onSetMediaItems(
@@ -414,22 +410,48 @@ class OneMusicAutoService : MediaLibraryService() {
             startIndex: Int,
             startPositionMs: Long
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-            val updated = mediaItems.map { item ->
-                val track = playbackManager.repository.tracks.value.find { it.id == item.mediaId }
-                if (track != null) {
-                    playbackManager.trackToMediaItem(track)
-                } else {
-                    item
-                }
-            }.toMutableList()
+            playbackManager.initContext(this@OneMusicAutoService)
+            val allTracks = playbackManager.repository.tracks.value
+            val byId = allTracks.associateBy { it.id }
 
-            if (updated.isNotEmpty() && startIndex in updated.indices) {
-                val selectedId = updated[startIndex].mediaId
-                playbackManager.playTrackById(selectedId)
+            // If a single track was chosen from Android Auto browse/search, expand context cleanly if helpful,
+            // or resolve every requested item without double-calling player.setMediaItems().
+            val resolved: MutableList<MediaItem> = if (mediaItems.size == 1) {
+                val single = mediaItems.first()
+                val directTrack = byId[single.mediaId]
+                if (directTrack != null) {
+                    val albumTracks = allTracks.filter { it.album.equals(directTrack.album, ignoreCase = true) }
+                        .sortedWith(com.example.model.AlbumTrackOrderComparator)
+                    val contextTracks = if (albumTracks.size > 1) albumTracks else listOf(directTrack)
+                    contextTracks.map { playbackManager.trackToMediaItem(it) }.toMutableList()
+                } else {
+                    resolvePlayableItemsForRequest(single, byId, allTracks).toMutableList()
+                }
+            } else {
+                mediaItems.flatMap { item ->
+                    resolvePlayableItemsForRequest(item, byId, allTracks)
+                }.toMutableList()
+            }
+
+            val safeStartIndex = if (resolved.isEmpty()) {
+                0
+            } else if (mediaItems.size == 1 && byId[mediaItems.first().mediaId] != null) {
+                val requestedId = mediaItems.first().mediaId
+                resolved.indexOfFirst { it.mediaId == requestedId }.let { if (it >= 0) it else 0 }
+            } else if (startIndex in resolved.indices) {
+                startIndex
+            } else {
+                0
+            }
+            val safeStartPositionMs = if (startPositionMs == C.TIME_UNSET || startPositionMs < 0L) 0L else startPositionMs
+
+            if (resolved.isNotEmpty()) {
+                playbackManager.syncQueueFromExternalMediaItems(resolved, safeStartIndex, safeStartPositionMs)
+                publishOngoingNotification()
             }
 
             return Futures.immediateFuture(
-                MediaSession.MediaItemsWithStartPosition(updated, startIndex, startPositionMs)
+                MediaSession.MediaItemsWithStartPosition(resolved, safeStartIndex, safeStartPositionMs)
             )
         }
 
@@ -442,7 +464,7 @@ class OneMusicAutoService : MediaLibraryService() {
             val queue = playbackManager.playbackQueue.value.ifEmpty { listOf(current) }
             val startIndex = queue.indexOfFirst { it.id == current.id }.let { if (it >= 0) it else 0 }
             val items = queue.map { playbackManager.trackToMediaItem(it) }
-            val pos = playbackManager.currentPositionMs.value
+            val pos = playbackManager.currentPositionMs.value.coerceAtLeast(0L)
             return Futures.immediateFuture(
                 MediaSession.MediaItemsWithStartPosition(items, startIndex, pos)
             )
@@ -453,28 +475,204 @@ class OneMusicAutoService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             playerCommand: Int
         ): Int {
-            when (playerCommand) {
-                Player.COMMAND_SEEK_TO_NEXT,
-                Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> {
-                    playbackManager.nextTrack()
-                    return SessionResult.RESULT_SUCCESS
-                }
-                Player.COMMAND_SEEK_TO_PREVIOUS,
-                Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> {
-                    playbackManager.previousTrack()
-                    return SessionResult.RESULT_SUCCESS
-                }
-            }
+            // Authorize commands only; actual execution runs once via SessionForwardingPlayer
+            // so Android Auto / Bluetooth AVRCP / car steering wheel skips do not double-trigger.
             return SessionResult.RESULT_SUCCESS
         }
     }
 
-    private fun createCategoryItem(id: String, title: String, subtitle: String): MediaItem {
+    /**
+     * ForwardingPlayer wrapper used by MediaLibrarySession so transport and skip commands
+     * from cars, Android Auto, Wireless AA, notifications, and Bluetooth headsets execute
+     * exactly once through AudioPlaybackManager (with queue wrap-around & idle recovery).
+     */
+    internal inner class SessionForwardingPlayer(
+        val basePlayer: Player
+    ) : ForwardingPlayer(basePlayer) {
+
+        override fun getAvailableCommands(): Player.Commands {
+            return super.getAvailableCommands().buildUpon()
+                .addAll(
+                    COMMAND_PLAY_PAUSE,
+                    COMMAND_SEEK_TO_NEXT,
+                    COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+                    COMMAND_SEEK_TO_PREVIOUS,
+                    COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM
+                )
+                .build()
+        }
+
+        override fun isCommandAvailable(command: Int): Boolean {
+            return when (command) {
+                COMMAND_PLAY_PAUSE,
+                COMMAND_SEEK_TO_NEXT,
+                COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+                COMMAND_SEEK_TO_PREVIOUS,
+                COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> true
+                else -> super.isCommandAvailable(command)
+            }
+        }
+
+        override fun hasNextMediaItem(): Boolean =
+            playbackManager.playbackQueue.value.size > 1 || super.hasNextMediaItem()
+
+        override fun hasPreviousMediaItem(): Boolean =
+            playbackManager.playbackQueue.value.size > 1 || super.hasPreviousMediaItem()
+
+        override fun play() {
+            playbackManager.resume()
+        }
+
+        override fun pause() {
+            playbackManager.pause()
+        }
+
+        override fun seekToNext() {
+            playbackManager.nextTrack()
+        }
+
+        override fun seekToNextMediaItem() {
+            playbackManager.nextTrack()
+        }
+
+        override fun seekToPrevious() {
+            playbackManager.previousTrack(forcePrevious = false)
+        }
+
+        override fun seekToPreviousMediaItem() {
+            playbackManager.previousTrack(forcePrevious = true)
+        }
+    }
+
+    internal fun buildChildrenPage(parentId: String, page: Int, pageSize: Int): List<MediaItem> {
+        val tracks = playbackManager.repository.tracks.value
+        val playlists = playbackManager.repository.playlists.value
+
+        val fullList: List<MediaItem> = when (parentId) {
+            ROOT_ID -> listOf(
+                createCategoryItem(MEDIA_ID_TRACKS, "All Tracks", "${tracks.size} songs", MediaMetadata.MEDIA_TYPE_FOLDER_MIXED),
+                createCategoryItem(MEDIA_ID_FAVORITES, "Favorites", "${tracks.count { it.isFavorite }} saved tracks", MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS),
+                createCategoryItem(MEDIA_ID_ALBUMS, "Albums", "${tracks.map { it.album }.distinct().size} albums", MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS),
+                createCategoryItem(MEDIA_ID_PLAYLISTS, "Playlists", "${playlists.size} playlists", MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS)
+            )
+
+            MEDIA_ID_TRACKS -> tracks.map { playbackManager.trackToBrowseMediaItem(it) }
+
+            MEDIA_ID_FAVORITES -> tracks.filter { it.isFavorite }.map { playbackManager.trackToBrowseMediaItem(it) }
+
+            MEDIA_ID_ALBUMS -> tracks.groupBy { it.album }.map { (albumName, albumTracks) ->
+                val artist = albumTracks.firstOrNull()?.artist ?: "Artist"
+                createCategoryItem("album_$albumName", albumName, "$artist • ${albumTracks.size} tracks", MediaMetadata.MEDIA_TYPE_ALBUM)
+            }
+
+            MEDIA_ID_PLAYLISTS -> playlists.map { playlist ->
+                createCategoryItem(
+                    "playlist_${playlist.id}",
+                    playlist.title,
+                    "${playlist.trackIds.size} songs • ${playlist.description}",
+                    MediaMetadata.MEDIA_TYPE_PLAYLIST
+                )
+            }
+
+            else -> when {
+                parentId.startsWith("album_") -> {
+                    val albumName = parentId.removePrefix("album_")
+                    tracks.filter { it.album == albumName }
+                        .sortedWith(com.example.model.AlbumTrackOrderComparator)
+                        .map { playbackManager.trackToBrowseMediaItem(it) }
+                }
+                parentId.startsWith("playlist_") -> {
+                    val playlistId = parentId.removePrefix("playlist_")
+                    val playlist = playlists.find { it.id == playlistId }
+                    if (playlist != null) {
+                        tracks.filter { playlist.trackIds.contains(it.id) }
+                            .map { playbackManager.trackToBrowseMediaItem(it) }
+                    } else {
+                        emptyList()
+                    }
+                }
+                else -> emptyList()
+            }
+        }
+
+        return paginateList(fullList, page, pageSize)
+    }
+
+    internal fun findMatchingTracks(query: String): List<Track> {
+        val allTracks = playbackManager.repository.tracks.value
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return allTracks.take(50)
+        return allTracks.filter {
+            it.title.contains(trimmed, ignoreCase = true) ||
+                it.artist.contains(trimmed, ignoreCase = true) ||
+                it.album.contains(trimmed, ignoreCase = true) ||
+                it.genre.contains(trimmed, ignoreCase = true)
+        }
+    }
+
+    private fun resolvePlayableItemsForRequest(
+        item: MediaItem,
+        byId: Map<String, Track>,
+        allTracks: List<Track>
+    ): List<MediaItem> {
+        val mediaId = item.mediaId
+        val matched = byId[mediaId]
+        if (matched != null) {
+            return listOf(playbackManager.trackToMediaItem(matched))
+        }
+        if (mediaId.startsWith("album_")) {
+            val albumName = mediaId.removePrefix("album_")
+            return allTracks.filter { it.album == albumName }
+                .sortedWith(com.example.model.AlbumTrackOrderComparator)
+                .map { playbackManager.trackToMediaItem(it) }
+        }
+        if (mediaId.startsWith("playlist_")) {
+            val playlistId = mediaId.removePrefix("playlist_")
+            val playlist = playbackManager.repository.playlists.value.find { it.id == playlistId }
+            if (playlist != null) {
+                return allTracks.filter { playlist.trackIds.contains(it.id) }
+                    .map { playbackManager.trackToMediaItem(it) }
+            }
+        }
+        // Voice search fallback: match MediaItem searchQuery or metadata title/artist
+        val searchText = item.requestMetadata.searchQuery
+            ?: item.mediaMetadata.title?.toString()
+            ?: item.mediaMetadata.artist?.toString()
+        if (!searchText.isNullOrBlank()) {
+            val matches = findMatchingTracks(searchText)
+            if (matches.isNotEmpty()) {
+                return matches.take(25).map { playbackManager.trackToMediaItem(it) }
+            }
+        }
+        return listOf(item)
+    }
+
+    internal fun <T> paginateList(list: List<T>, page: Int, pageSize: Int): List<T> {
+        if (list.isEmpty()) return emptyList()
+        if (page < 0 || pageSize <= 0 || pageSize == Int.MAX_VALUE) {
+            // Protect Binder IPC buffer against TransactionTooLargeException over Wireless AA
+            return if (list.size > 150) list.take(150) else list
+        }
+        val safePageSize = pageSize.coerceAtMost(150)
+        val fromIndex = page.toLong() * safePageSize.toLong()
+        if (fromIndex >= list.size) return emptyList()
+        val start = fromIndex.toInt()
+        val end = minOf(start + safePageSize, list.size)
+        return list.subList(start, end)
+    }
+
+    private fun createCategoryItem(
+        id: String,
+        title: String,
+        subtitle: String,
+        mediaType: Int = MediaMetadata.MEDIA_TYPE_FOLDER_MIXED
+    ): MediaItem {
         val metadata = MediaMetadata.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
             .setIsBrowsable(true)
             .setIsPlayable(false)
+            .setMediaType(mediaType)
             .build()
         return MediaItem.Builder()
             .setMediaId(id)
@@ -486,8 +684,10 @@ class OneMusicAutoService : MediaLibraryService() {
         playbackManager.persistPlaybackState()
         updatesJob?.cancel()
         serviceScope.cancel()
+        // CRITICAL: Never call player.release() on the shared AudioPlaybackManager ExoPlayer singleton here.
+        // Releasing the shared ExoPlayer when OS cleans up an idle background service breaks in-app
+        // playback after inactivity until process restart. Only release the MediaLibrarySession wrapper.
         mediaLibrarySession?.run {
-            player.release()
             release()
             mediaLibrarySession = null
         }

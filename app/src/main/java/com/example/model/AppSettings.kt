@@ -316,5 +316,8 @@ data class AppSettings(
     val lyricsSyncWifiOnly: Boolean = false,
     val lyricsAnimationStyle: LyricsAnimationStyle = LyricsAnimationStyle.SMOOTH_FLOAT,
     val lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
-    val lyricsGlowEnabled: Boolean = true
+    val lyricsGlowEnabled: Boolean = true,
+    val enableAnimatedCovers: Boolean = true,
+    val autoFetchAnimatedCoversWifiOnly: Boolean = true,
+    val simulateMotionOnStaticCovers: Boolean = true
 )

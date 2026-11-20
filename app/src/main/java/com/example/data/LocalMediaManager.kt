@@ -6,12 +6,13 @@ import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.compose.ui.graphics.Color
 import com.example.model.CoverArtType
 import com.example.model.Track
-import java.util.UUID
+import java.security.MessageDigest
 
 object LocalMediaManager {
 
@@ -57,6 +58,29 @@ object LocalMediaManager {
         }
     }
 
+    internal fun resolveImportTrackId(context: Context, uri: Uri): String {
+        try {
+            if (uri.authority == "com.android.providers.media.documents" &&
+                (DocumentsContract.isDocumentUri(context, uri) || uri.pathSegments.firstOrNull() == "document")
+            ) {
+                val docId = DocumentsContract.getDocumentId(uri)
+                val parts = docId.split(":")
+                if (parts.size == 2 && parts[0] == "audio" && parts[1].toLongOrNull() != null) {
+                    return "device_media_${parts[1]}"
+                }
+            }
+            if (uri.authority == MediaStore.AUTHORITY) {
+                val last = uri.lastPathSegment?.toLongOrNull()
+                if (last != null && uri.pathSegments.contains("audio")) {
+                    return "device_media_$last"
+                }
+            }
+        } catch (_: Exception) {}
+        val digest = MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray(Charsets.UTF_8))
+        val shortHash = digest.take(12).joinToString("") { "%02x".format(it) }
+        return "local_$shortHash"
+    }
+
     fun importAudioFromUris(context: Context, uris: List<Uri>): List<Track> {
         val importedTracks = mutableListOf<Track>()
 
@@ -89,7 +113,7 @@ object LocalMediaManager {
                 var trackNumber = 0
                 var discNumber = 0
 
-                val trackId = "local_${UUID.randomUUID()}"
+                val trackId = resolveImportTrackId(context, uri)
                 var hasArt = false
                 val artKey = "art_$trackId"
                 var extractedPrimary: Color? = null

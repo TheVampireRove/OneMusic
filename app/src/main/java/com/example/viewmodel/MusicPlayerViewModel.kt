@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.example.audio.AudioPlaybackManager
+import com.example.data.AnimatedArtRepository
 import com.example.data.LocalMediaManager
 import com.example.data.LocalTracksCache
 import com.example.data.LyricsRepository
@@ -20,6 +21,7 @@ import com.example.model.RepeatMode
 import com.example.model.SortOption
 import com.example.model.SoundAlivePreset
 import com.example.model.Track
+import com.example.ui.components.DisplayMode
 import com.example.worker.LyricsSyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,6 +46,15 @@ data class LyricsSyncUiState(
     val currentTrackTitle: String = "",
     val lastRunCompleted: Boolean = false,
     val statusSummary: LyricsStatusSummary = LyricsStatusSummary(0, 0, 0, 0, 0)
+)
+
+data class ImportSummaryBanner(
+    val addedCount: Int,
+    val skippedDuplicates: Int,
+    val consolidatedDuplicates: Int = 0,
+    val importedTrackIds: List<String> = emptyList(),
+    val summaryLabel: String,
+    val isFileImport: Boolean = true
 )
 
 class MusicPlayerViewModel(
@@ -105,6 +116,10 @@ class MusicPlayerViewModel(
     private val _isFlexModeActive = MutableStateFlow(false)
     val isFlexModeActive: StateFlow<Boolean> = _isFlexModeActive.asStateFlow()
 
+    // Hoisted player display mode so Artwork / Lyrics / Visualizer persists smoothly across postures & tabletop mode
+    private val _displayMode = MutableStateFlow(DisplayMode.ARTWORK)
+    val displayMode: StateFlow<DisplayMode> = _displayMode.asStateFlow()
+
     private val _sleepTimerMinutesLeft = MutableStateFlow<Int?>(null)
     val sleepTimerMinutesLeft: StateFlow<Int?> = _sleepTimerMinutesLeft.asStateFlow()
 
@@ -128,6 +143,9 @@ class MusicPlayerViewModel(
 
     private val _lyricsSyncUiState = MutableStateFlow(LyricsSyncUiState())
     val lyricsSyncUiState: StateFlow<LyricsSyncUiState> = _lyricsSyncUiState.asStateFlow()
+
+    private val _recentImportBanner = MutableStateFlow<ImportSummaryBanner?>(null)
+    val recentImportBanner: StateFlow<ImportSummaryBanner?> = _recentImportBanner.asStateFlow()
 
     private var sleepTimerJob: Job? = null
     private var lyricsFetchJob: Job? = null
@@ -321,6 +339,39 @@ class MusicPlayerViewModel(
         _isFlexModeActive.value = active
         if (active) {
             _isPlayerExpanded.value = true
+        }
+    }
+
+    fun setDisplayMode(mode: DisplayMode) {
+        _displayMode.value = mode
+    }
+
+    fun ensureActivePlayback(context: Context) {
+        initContext(context)
+        playbackManager.ensureActivePlayer()
+    }
+
+    fun importAnimatedCover(context: Context, track: Track, uri: Uri) {
+        val appCtx = context.applicationContext
+        initContext(appCtx)
+        viewModelScope.launch {
+            AnimatedArtRepository.importAnimatedCover(appCtx, track, uri)
+        }
+    }
+
+    fun removeCustomAnimatedCover(context: Context, track: Track) {
+        val appCtx = context.applicationContext
+        initContext(appCtx)
+        viewModelScope.launch {
+            AnimatedArtRepository.removeCustomCover(appCtx, track)
+        }
+    }
+
+    fun clearAnimatedCoverCache(context: Context, onCleared: (Int) -> Unit = {}) {
+        val appCtx = context.applicationContext
+        viewModelScope.launch {
+            val count = AnimatedArtRepository.clearCache(appCtx)
+            onCleared(count)
         }
     }
 
@@ -572,22 +623,46 @@ class MusicPlayerViewModel(
     }
 
     fun importLocalFiles(context: Context, uris: List<Uri>) {
-        initContext(context)
+        val appCtx = context.applicationContext
+        initContext(appCtx)
         viewModelScope.launch(Dispatchers.IO) {
-            val imported = LocalMediaManager.importAudioFromUris(context, uris)
+            val imported = LocalMediaManager.importAudioFromUris(appCtx, uris)
             if (imported.isNotEmpty()) {
-                repository.addTracks(imported)
-                LocalTracksCache.saveTracks(context, repository.tracks.value)
-                if (repository.settings.value.autoFetchLyricsOnScan) {
+                val result = repository.addTracksWithReport(imported)
+                if (result.remappedIds.isNotEmpty()) {
+                    playbackManager.removeOrRemapTracks(emptySet(), result.remappedIds)
+                }
+                LocalTracksCache.saveTracks(appCtx, repository.tracks.value)
+
+                val addedIds = result.addedTracks.map { it.id }
+                val summaryMsg = buildString {
+                    if (result.addedTracks.isNotEmpty()) {
+                        append("Imported ${result.addedTracks.size} track${if (result.addedTracks.size == 1) "" else "s"}")
+                        if (result.skippedDuplicates > 0) {
+                            append(" • ${result.skippedDuplicates} duplicate${if (result.skippedDuplicates == 1) "" else "s"} skipped")
+                        }
+                    } else {
+                        append("All ${result.skippedDuplicates} selected track${if (result.skippedDuplicates == 1) "" else "s"} already in library")
+                    }
+                }
+                _recentImportBanner.value = ImportSummaryBanner(
+                    addedCount = result.addedTracks.size,
+                    skippedDuplicates = result.skippedDuplicates,
+                    importedTrackIds = addedIds,
+                    summaryLabel = summaryMsg,
+                    isFileImport = true
+                )
+
+                if (result.addedTracks.isNotEmpty() && repository.settings.value.autoFetchLyricsOnScan) {
                     LyricsSyncWorker.enqueue(
-                        context = context,
+                        context = appCtx,
                         wifiOnly = repository.settings.value.lyricsSyncWifiOnly,
                         replaceExisting = false
                     )
                 }
-                if (!isPlaying.value) {
+                if (result.addedTracks.isNotEmpty() && !isPlaying.value) {
                     launch(Dispatchers.Main) {
-                        playFromContext(imported, 0)
+                        playFromContext(result.addedTracks, 0)
                     }
                 }
             }
@@ -595,19 +670,130 @@ class MusicPlayerViewModel(
     }
 
     fun scanDeviceMusic(context: Context) {
-        initContext(context)
+        val appCtx = context.applicationContext
+        initContext(appCtx)
         viewModelScope.launch(Dispatchers.IO) {
-            val scanned = LocalMediaManager.scanDeviceAudio(context)
+            val scanned = LocalMediaManager.scanDeviceAudio(appCtx)
             if (scanned.isNotEmpty()) {
-                repository.addTracks(scanned)
-                LocalTracksCache.saveTracks(context, repository.tracks.value)
+                val addResult = repository.addTracksWithReport(scanned)
+                val dedupResult = repository.removeDuplicateTracks()
+                playbackManager.removeOrRemapTracks(
+                    removedIds = dedupResult.removedIds,
+                    remappedIds = addResult.remappedIds + dedupResult.remappedIds
+                )
+                LocalTracksCache.saveTracks(appCtx, repository.tracks.value)
+
+                val mergedCount = addResult.remappedIds.size + dedupResult.removedIds.size
+                if (addResult.addedTracks.isNotEmpty() || mergedCount > 0) {
+                    val label = buildString {
+                        if (addResult.addedTracks.isNotEmpty()) {
+                            append("Added ${addResult.addedTracks.size} scanned track${if (addResult.addedTracks.size == 1) "" else "s"}")
+                        } else {
+                            append("Library scan complete")
+                        }
+                        if (mergedCount > 0) {
+                            append(" • Merged $mergedCount duplicate${if (mergedCount == 1) "" else "s"}")
+                        }
+                    }
+                    _recentImportBanner.value = ImportSummaryBanner(
+                        addedCount = addResult.addedTracks.size,
+                        skippedDuplicates = addResult.skippedDuplicates,
+                        consolidatedDuplicates = mergedCount,
+                        importedTrackIds = addResult.addedTracks.map { it.id },
+                        summaryLabel = label,
+                        isFileImport = false
+                    )
+                }
+
                 if (repository.settings.value.autoFetchLyricsOnScan) {
                     LyricsSyncWorker.enqueue(
-                        context = context,
+                        context = appCtx,
                         wifiOnly = repository.settings.value.lyricsSyncWifiOnly,
                         replaceExisting = false
                     )
                 }
+            }
+        }
+    }
+
+    fun undoLastImport(context: Context) {
+        val appCtx = context.applicationContext
+        initContext(appCtx)
+        val banner = _recentImportBanner.value ?: return
+        val idsToRemove = banner.importedTrackIds.toSet()
+        _recentImportBanner.value = null
+        if (idsToRemove.isEmpty()) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val removed = repository.removeTracksByIds(idsToRemove)
+            if (removed.isNotEmpty()) {
+                playbackManager.removeOrRemapTracks(idsToRemove)
+                LocalTracksCache.saveTracks(appCtx, repository.tracks.value)
+            }
+        }
+    }
+
+    fun dismissImportBanner() {
+        _recentImportBanner.value = null
+    }
+
+    fun removeTrack(context: Context, trackId: String) {
+        removeTracksByIds(context, setOf(trackId))
+    }
+
+    fun removeTracksByIds(context: Context, trackIds: Set<String>) {
+        if (trackIds.isEmpty()) return
+        val appCtx = context.applicationContext
+        initContext(appCtx)
+        viewModelScope.launch(Dispatchers.IO) {
+            val removed = repository.removeTracksByIds(trackIds)
+            if (removed.isNotEmpty()) {
+                playbackManager.removeOrRemapTracks(trackIds)
+                LocalTracksCache.saveTracks(appCtx, repository.tracks.value)
+                _recentImportBanner.value?.let { currentBanner ->
+                    val remaining = currentBanner.importedTrackIds.filterNot { it in trackIds }
+                    _recentImportBanner.value = if (remaining.isEmpty()) null else currentBanner.copy(
+                        addedCount = remaining.size,
+                        importedTrackIds = remaining
+                    )
+                }
+            }
+        }
+    }
+
+    fun removeDuplicateTracks(context: Context, onComplete: (Int) -> Unit = {}) {
+        val appCtx = context.applicationContext
+        initContext(appCtx)
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = repository.removeDuplicateTracks()
+            if (result.removedIds.isNotEmpty() || result.remappedIds.isNotEmpty()) {
+                playbackManager.removeOrRemapTracks(result.removedIds, result.remappedIds)
+                LocalTracksCache.saveTracks(appCtx, repository.tracks.value)
+            }
+            launch(Dispatchers.Main) {
+                onComplete(result.removedIds.size)
+            }
+        }
+    }
+
+    fun clearFilePickedImports(context: Context, onComplete: (Int) -> Unit = {}) {
+        val appCtx = context.applicationContext
+        initContext(appCtx)
+        viewModelScope.launch(Dispatchers.IO) {
+            val filePickedIds = repository.tracks.value
+                .filter { it.isLocalFile && it.id.startsWith("local_") }
+                .map { it.id }
+                .toSet()
+            val removed = repository.removeTracksByIds(filePickedIds)
+            if (removed.isNotEmpty()) {
+                playbackManager.removeOrRemapTracks(filePickedIds)
+                LocalTracksCache.saveTracks(appCtx, repository.tracks.value)
+                if (_recentImportBanner.value?.isFileImport == true) {
+                    _recentImportBanner.value = null
+                }
+            }
+            launch(Dispatchers.Main) {
+                onComplete(removed.size)
             }
         }
     }

@@ -17,6 +17,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -27,6 +30,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -37,14 +41,19 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -59,10 +68,15 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import android.widget.Toast
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothConnected
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.MusicNote
@@ -74,6 +88,7 @@ import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.SurroundSound
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -81,6 +96,7 @@ import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
@@ -102,6 +118,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -110,6 +127,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.AlbumArtSize
@@ -126,6 +146,7 @@ import com.example.ui.components.AlbumDetailScreen
 import com.example.ui.components.AlphabetIndexer
 import com.example.ui.components.ArtistDetailScreen
 import com.example.ui.components.CoverArtView
+import com.example.ui.components.CoverLandscapeLayout
 import com.example.ui.components.EqualizerSheet
 import com.example.ui.components.ExpandedDualPaneScreen
 import com.example.ui.components.FlexModePlayer
@@ -139,16 +160,23 @@ import com.example.ui.components.SleepTimerDialog
 import com.example.ui.components.TrackListItem
 import com.example.ui.components.formatTime
 import com.example.ui.settings.SettingsScreen
+import com.example.ui.theme.LocalAnimatedVisibilityScope
+import com.example.ui.theme.LocalSharedTransitionScope
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.NavigationTransitions
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
 import com.example.ui.theme.OneUISquircleMedium
+import com.example.ui.theme.appSharedBounds
+import com.example.ui.theme.bouncableClick
 import com.example.ui.theme.generatePaletteFromHex
 import com.example.ui.theme.getAndroid17MonetPalette
 import com.example.ui.theme.glassmorphism
 import com.example.ui.theme.parseHexColor
 import com.example.ui.theme.rememberAnimatedExpressivePalette
+import com.example.data.MusicRepository
+import com.example.viewmodel.ImportSummaryBanner
 import com.example.viewmodel.MusicPlayerViewModel
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.delay
@@ -158,10 +186,42 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestHighestRefreshRate()
         setContent {
             MyApplicationTheme(darkTheme = true) {
                 OneUIMusicApp()
             }
+        }
+    }
+
+    /**
+     * Hints the Android window composer to prefer the display's highest available refresh rate
+     * (e.g., 120Hz LTPO) at the current physical resolution for silky-smooth animations.
+     */
+    private fun requestHighestRefreshRate() {
+        try {
+            val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay
+            } ?: return
+            val currentMode = activeDisplay.mode
+            val bestMode = activeDisplay.supportedModes
+                .filter {
+                    it.physicalWidth == currentMode.physicalWidth &&
+                        it.physicalHeight == currentMode.physicalHeight
+                }
+                .maxByOrNull { it.refreshRate }
+                ?: activeDisplay.supportedModes.maxByOrNull { it.refreshRate }
+                ?: return
+
+            val params = window.attributes
+            params.preferredDisplayModeId = bestMode.modeId
+            params.preferredRefreshRate = bestMode.refreshRate
+            window.attributes = params
+        } catch (_: Exception) {
+            // Safe fallback on virtual / headless displays
         }
     }
 
@@ -184,10 +244,11 @@ class MainActivity : ComponentActivity() {
 private enum class AppLayoutMode {
     TABLETOP,
     DUAL_PANE,
+    COVER_LANDSCAPE,
     COVER
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
     // Samsung One UI reachability scroll behavior:
@@ -225,10 +286,19 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
     val trebleGain by viewModel.trebleGain.collectAsStateWithLifecycle()
     val dolbyAtmosEnabled by viewModel.dolbyAtmosEnabled.collectAsStateWithLifecycle()
     val isFlexModeActive by viewModel.isFlexModeActive.collectAsStateWithLifecycle()
+    val displayMode by viewModel.displayMode.collectAsStateWithLifecycle()
     val sortOption by viewModel.sortOption.collectAsStateWithLifecycle()
     val activeFilter by viewModel.activeFilter.collectAsStateWithLifecycle()
     val isLoadingLyrics by viewModel.isLoadingLyrics.collectAsStateWithLifecycle()
     val lyricsSyncUiState by viewModel.lyricsSyncUiState.collectAsStateWithLifecycle()
+    val recentImportBanner by viewModel.recentImportBanner.collectAsStateWithLifecycle()
+
+    LaunchedEffect(recentImportBanner) {
+        if (recentImportBanner != null) {
+            delay(9000L)
+            viewModel.dismissImportBanner()
+        }
+    }
 
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -308,9 +378,12 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
     // Samsung One UI & Android 17 Navigation Gestures Back Handler:
     // When on the root view, the back swipe gesture instantly and cleanly terminates the task and exits the app.
     val isRootView = !isPlayerExpanded && !isSettingsOpen && !isEqualizerOpen && !isSleepTimerOpen && !isFlexModeActive && selectedAlbumForDetail == null && selectedArtistForDetail == null
-    BackHandler(enabled = isRootView) {
-        activity?.finishAffinity()
-        activity?.finish()
+    PredictiveBackHandler(enabled = isRootView) { progress ->
+        try {
+            progress.collect { }
+            activity?.finishAffinity()
+            activity?.finish()
+        } catch (_: CancellationException) {}
     }
 
     val isBluetoothConnected by BluetoothAudioHelper.isBluetoothConnected.collectAsStateWithLifecycle()
@@ -396,6 +469,19 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
         }
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.ensureActivePlayback(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.initContext(context)
         BluetoothAudioHelper.init(context)
@@ -471,14 +557,22 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
         Color(0xFF0F101E)
     }
 
-    CompositionLocalProvider(LocalOneUITooltipHandler provides showTooltipHUD) {
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(appBgColor)
+    SharedTransitionLayout(modifier = Modifier.fillMaxSize()) {
+        CompositionLocalProvider(
+            LocalOneUITooltipHandler provides showTooltipHUD,
+            LocalSharedTransitionScope provides this@SharedTransitionLayout
         ) {
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(appBgColor)
+            ) {
+            val configuration = LocalConfiguration.current
+            val isInnerDisplay = configuration.smallestScreenWidthDp >= 580
+            val isLandscape = maxWidth > maxHeight
+
             val isExpanded = when (settings.dualPaneMode) {
-                DualPaneSetting.AUTO -> maxWidth >= 720.dp
+                DualPaneSetting.AUTO -> isInnerDisplay && maxWidth >= 720.dp
                 DualPaneSetting.ALWAYS -> true
                 DualPaneSetting.OFF -> false
             }
@@ -502,6 +596,7 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
             val layoutMode = when {
                 isFlexModeActive -> AppLayoutMode.TABLETOP
                 isExpanded -> AppLayoutMode.DUAL_PANE
+                isLandscape -> AppLayoutMode.COVER_LANDSCAPE
                 else -> AppLayoutMode.COVER
             }
 
@@ -566,6 +661,13 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                     lyricsAnimationSpeed = settings.lyricsAnimationSpeed,
                     lyricsGlowEnabled = settings.lyricsGlowEnabled,
                     isLoadingLyrics = isLoadingLyrics,
+                    displayMode = displayMode,
+                    onDisplayModeChange = { viewModel.setDisplayMode(it) },
+                    enableAnimatedCovers = settings.enableAnimatedCovers,
+                    autoFetchAnimatedCoversWifiOnly = settings.autoFetchAnimatedCoversWifiOnly,
+                    simulateMotionOnStaticCovers = settings.simulateMotionOnStaticCovers,
+                    onImportAnimatedCover = { uri -> viewModel.importAnimatedCover(context, currentTrack, uri) },
+                    onRemoveCustomAnimatedCover = { viewModel.removeCustomAnimatedCover(context, currentTrack) },
                     onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
                     onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
                     loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
@@ -648,15 +750,160 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                     onPickLocalFiles = onPickFiles,
                     onScanDeviceStorage = onScanStorage,
                     isLoadingLyrics = isLoadingLyrics,
+                    displayMode = displayMode,
+                    onDisplayModeChange = { viewModel.setDisplayMode(it) },
+                    enableAnimatedCovers = settings.enableAnimatedCovers,
+                    autoFetchAnimatedCoversWifiOnly = settings.autoFetchAnimatedCoversWifiOnly,
+                    simulateMotionOnStaticCovers = settings.simulateMotionOnStaticCovers,
+                    onImportAnimatedCover = { uri -> viewModel.importAnimatedCover(context, currentTrack, uri) },
+                    onRemoveCustomAnimatedCover = { viewModel.removeCustomAnimatedCover(context, currentTrack) },
                     onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
                     onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
                     loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
                     onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
-                    onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) }
+                    onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) },
+                    onRemoveLocalTrack = { track ->
+                        viewModel.removeTrack(context, track.id)
+                        Toast.makeText(context, "Removed \"${track.title}\" from library", Toast.LENGTH_SHORT).show()
+                    }
                 )
                     }
+                    AppLayoutMode.COVER_LANDSCAPE -> {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            CoverLandscapeLayout(
+                                currentTrack = currentTrack,
+                                isPlaying = isPlaying,
+                                currentPositionMs = currentPositionMs,
+                                tracks = tracks,
+                                allTracks = allTracksList,
+                                favoriteTracks = favoriteTracks,
+                                playlists = playlists,
+                                selectedTab = selectedTab,
+                                searchQuery = searchQuery,
+                                selectedAlbumId = selectedAlbumForDetail,
+                                selectedArtistId = selectedArtistForDetail,
+                                palette = palette,
+                                isBluetoothConnected = isBluetoothConnected,
+                                connectedDeviceName = connectedDeviceName,
+                                albumLayoutSetting = settings.albumLayout,
+                                albumArtSize = settings.trackListAlbumArtSize,
+                                progressBarDesign = settings.progressBarDesign,
+                                progressBarThickness = settings.progressBarThickness,
+                                activeFilter = activeFilter,
+                                sortOption = sortOption,
+                                elementColors = settings.elementColors,
+                                themeEngine = settings.themeEngine,
+                                useCustomElementColors = settings.useCustomElementColors,
+                                enableAnimatedCovers = settings.enableAnimatedCovers,
+                                autoFetchAnimatedCoversWifiOnly = settings.autoFetchAnimatedCoversWifiOnly,
+                                simulateMotionOnStaticCovers = settings.simulateMotionOnStaticCovers,
+                                tabListStates = tabListStates,
+                                tracksListState = tracksListState,
+                                albumsGridState = albumsGridState,
+                                artistsGridState = artistsGridState,
+                                albumDetailListState = albumDetailListState,
+                                artistDetailListState = artistDetailListState,
+                                artistDetailAlbumsRowState = artistDetailAlbumsRowState,
+                                onTabSelected = { viewModel.selectTab(it) },
+                                onSearchQueryChange = { viewModel.updateSearchQuery(it) },
+                                onSelectAlbumForDetail = { viewModel.selectAlbumForDetail(it) },
+                                onSelectArtistForDetail = { viewModel.selectArtistForDetail(it) },
+                                onTrackClick = { viewModel.playTrack(it) },
+                                onPlayFromContext = onPlayFromContext,
+                                onShuffleFromContext = onShuffleFromContext,
+                                onTogglePlayPause = { viewModel.togglePlayPause() },
+                                onNext = { viewModel.nextTrack() },
+                                onPrevious = { viewModel.previousTrack() },
+                                onSeek = { viewModel.seekTo(it) },
+                                onToggleFavorite = { viewModel.toggleFavorite(it) },
+                                onExpandPlayer = { viewModel.expandPlayer() },
+                                onOpenEqualizer = { viewModel.openEqualizer() },
+                                onOpenBluetooth = { BluetoothAudioHelper.openBluetoothSettings(context) },
+                                onOpenSettings = { viewModel.openSettings() },
+                                onFilterSelected = { viewModel.setActiveFilter(it) },
+                                onOpenSortDialog = { isSortDialogOpen = true },
+                                onPickLocalFiles = onPickFiles,
+                                onScanDeviceStorage = onScanStorage,
+                                onImportAnimatedCover = { uri -> viewModel.importAnimatedCover(context, currentTrack, uri) },
+                                onRemoveCustomAnimatedCover = { viewModel.removeCustomAnimatedCover(context, currentTrack) },
+                                onRemoveLocalTrack = { track ->
+                                    viewModel.removeTrack(context, track.id)
+                                    Toast.makeText(context, "Removed \"${track.title}\" from library", Toast.LENGTH_SHORT).show()
+                                },
+                                onBackPress = {
+                                    activity?.finishAffinity()
+                                    activity?.finish()
+                                }
+                            )
+
+                            AnimatedContent(
+                                targetState = isPlayerExpanded,
+                                transitionSpec = {
+                                    if (targetState) {
+                                        NavigationTransitions.playerSheetEnter(this) togetherWith ExitTransition.None
+                                    } else {
+                                        EnterTransition.None togetherWith NavigationTransitions.playerSheetExit(this)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize(),
+                                label = "cover_landscape_now_playing_sheet_transition"
+                            ) { expanded ->
+                                if (expanded) {
+                                    NowPlayingScreen(
+                                        track = currentTrack,
+                                        isPlaying = isPlaying,
+                                        currentPositionMs = currentPositionMs,
+                                        visualizerAmplitudes = visualizerAmplitudes,
+                                        isShuffleActive = isShuffleActive,
+                                        repeatMode = repeatMode,
+                                        volume = volume,
+                                        speed = speed,
+                                        sleepTimerMinutesLeft = sleepTimerMinutesLeft,
+                                        onCollapse = { viewModel.collapsePlayer() },
+                                        onTogglePlayPause = { viewModel.togglePlayPause() },
+                                        onNext = { viewModel.nextTrack() },
+                                        onPrevious = { viewModel.previousTrack() },
+                                        onSeek = { viewModel.seekTo(it) },
+                                        onToggleShuffle = { viewModel.toggleShuffle() },
+                                        onCycleRepeat = { viewModel.cycleRepeatMode() },
+                                        onToggleFavorite = { viewModel.toggleFavorite(currentTrack.id) },
+                                        onVolumeChange = { viewModel.setVolume(it) },
+                                        onSpeedChange = { viewModel.setPlaybackSpeed(it) },
+                                        onOpenEqualizer = { viewModel.openEqualizer() },
+                                        onOpenSleepTimer = { viewModel.openSleepTimer() },
+                                        progressBarDesign = settings.progressBarDesign,
+                                        progressBarThickness = settings.progressBarThickness,
+                                        playerButtonSize = settings.playerButtonSize,
+                                        visualizerAlbumArtSize = settings.visualizerAlbumArtSize,
+                                        visualizerStyle = settings.visualizerStyle,
+                                        onVisualizerStyleChange = { newStyle ->
+                                            viewModel.updateSettings { it.copy(visualizerStyle = newStyle) }
+                                        },
+                                        buttonAnimationEffect = settings.buttonAnimationEffect,
+                                        lyricsAnimationStyle = settings.lyricsAnimationStyle,
+                                        lyricsAnimationSpeed = settings.lyricsAnimationSpeed,
+                                        lyricsGlowEnabled = settings.lyricsGlowEnabled,
+                                        elementColors = settings.elementColors,
+                                        isLoadingLyrics = isLoadingLyrics,
+                                        displayMode = displayMode,
+                                        onDisplayModeChange = { viewModel.setDisplayMode(it) },
+                                        enableAnimatedCovers = settings.enableAnimatedCovers,
+                                        autoFetchAnimatedCoversWifiOnly = settings.autoFetchAnimatedCoversWifiOnly,
+                                        simulateMotionOnStaticCovers = settings.simulateMotionOnStaticCovers,
+                                        onImportAnimatedCover = { uri -> viewModel.importAnimatedCover(context, currentTrack, uri) },
+                                        onRemoveCustomAnimatedCover = { viewModel.removeCustomAnimatedCover(context, currentTrack) },
+                                        onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
+                                        onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
+                                        loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
+                                        onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
+                                        onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) }
+                                    )
+                                }
+                            }
+                        }
+                    }
                     AppLayoutMode.COVER -> {
-                        val navBarBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                        val navBarBottomPadding = WindowInsets.navigationBars.union(WindowInsets.displayCutout).asPaddingValues().calculateBottomPadding()
                         val navController = rememberNavController()
                         val navBackStackEntry by navController.currentBackStackEntryAsState()
                         val currentRoute = navBackStackEntry?.destination?.route ?: "cover_library"
@@ -728,6 +975,7 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 composable("cover_library") {
+                                    CompositionLocalProvider(LocalAnimatedVisibilityScope provides this@composable) {
                                     // Samsung One UI Reachability Layout:
                                     // Viewing area on top with Material 3 LargeTopAppBar (~270dp expanded height) that collapses smoothly to 64dp
                                     // Interaction area in the thumb zone below with proper padding for sticky MiniPlayer
@@ -803,6 +1051,7 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                 },
                                 collapsedHeight = 64.dp,
                                 expandedHeight = 270.dp,
+                                windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                                 colors = TopAppBarDefaults.largeTopAppBarColors(
                                     containerColor = expandedBg,
                                     scrolledContainerColor = collapsedBg,
@@ -816,7 +1065,7 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                             Spacer(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .windowInsetsPadding(WindowInsets.navigationBars)
+                                    .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.displayCutout.only(WindowInsetsSides.Bottom)))
                                     .height(84.dp)
                             )
                         }
@@ -925,7 +1174,11 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                             onPlayFromContext = onPlayFromContext,
                                             onToggleFavorite = { viewModel.toggleFavorite(it.id) },
                                             onPickLocalFiles = onPickFiles,
-                                            onScanDeviceStorage = onScanStorage
+                                            onScanDeviceStorage = onScanStorage,
+                                            onRemoveLocalTrack = { track ->
+                                                viewModel.removeTrack(context, track.id)
+                                                Toast.makeText(context, "Removed \"${track.title}\" from library", Toast.LENGTH_SHORT).show()
+                                            }
                                         )
                                     }
                                     MusicTab.PLAYLISTS -> {
@@ -972,7 +1225,11 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                             listState = tabListStates.getValue(MusicTab.FAVORITES),
                                             onTrackClick = { viewModel.playTrack(it) },
                                             onPlayFromContext = onPlayFromContext,
-                                            onToggleFavorite = { viewModel.toggleFavorite(it.id) }
+                                            onToggleFavorite = { viewModel.toggleFavorite(it.id) },
+                                            onRemoveLocalTrack = { track ->
+                                                viewModel.removeTrack(context, track.id)
+                                                Toast.makeText(context, "Removed \"${track.title}\" from library", Toast.LENGTH_SHORT).show()
+                                            }
                                         )
                                     }
                                 }
@@ -980,60 +1237,65 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                         }
                     }
                     }
+                                    }
                                 }
                                 composable("cover_artist") {
-                                    val artistName = selectedArtistForDetail ?: retainedArtistForDetail
-                                    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F101E))) {
-                                        artistName?.let { name ->
-                                            val artistTracks = remember(name, allTracksList) {
-                                                allTracksList.filter { it.artist.equals(name, ignoreCase = true) }
+                                    CompositionLocalProvider(LocalAnimatedVisibilityScope provides this@composable) {
+                                        val artistName = selectedArtistForDetail ?: retainedArtistForDetail
+                                        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F101E))) {
+                                            artistName?.let { name ->
+                                                val artistTracks = remember(name, allTracksList) {
+                                                    allTracksList.filter { it.artist.equals(name, ignoreCase = true) }
+                                                }
+                                                ArtistDetailScreen(
+                                                    artistName = name,
+                                                    tracks = artistTracks,
+                                                    currentTrack = currentTrack,
+                                                    isPlaying = isPlaying,
+                                                    accentColor = palette.accent,
+                                                    albumArtSize = settings.trackListAlbumArtSize,
+                                                    elementColors = settings.elementColors,
+                                                    listState = artistDetailListState,
+                                                    albumsRowState = artistDetailAlbumsRowState,
+                                                    bottomContentPadding = navBarBottomPadding + 92.dp,
+                                                    enableBackHandler = false,
+                                                    onBack = { viewModel.selectArtistForDetail(null) },
+                                                    onSelectAlbum = { viewModel.selectAlbumForDetail(it) },
+                                                    onPlayFromContext = onPlayFromContext,
+                                                    onShuffleFromContext = onShuffleFromContext,
+                                                    onToggleFavorite = { viewModel.toggleFavorite(it.id) }
+                                                )
                                             }
-                                            ArtistDetailScreen(
-                                                artistName = name,
-                                                tracks = artistTracks,
-                                                currentTrack = currentTrack,
-                                                isPlaying = isPlaying,
-                                                accentColor = palette.accent,
-                                                albumArtSize = settings.trackListAlbumArtSize,
-                                                elementColors = settings.elementColors,
-                                                listState = artistDetailListState,
-                                                albumsRowState = artistDetailAlbumsRowState,
-                                                bottomContentPadding = navBarBottomPadding + 92.dp,
-                                                enableBackHandler = false,
-                                                onBack = { viewModel.selectArtistForDetail(null) },
-                                                onSelectAlbum = { viewModel.selectAlbumForDetail(it) },
-                                                onPlayFromContext = onPlayFromContext,
-                                                onShuffleFromContext = onShuffleFromContext,
-                                                onToggleFavorite = { viewModel.toggleFavorite(it.id) }
-                                            )
                                         }
                                     }
                                 }
                                 composable("cover_album") {
-                                    val albumName = selectedAlbumForDetail ?: retainedAlbumForDetail
-                                    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F101E))) {
-                                        albumName?.let { name ->
-                                            val albumTracks = remember(name, allTracksList) {
-                                                allTracksList
-                                                    .filter { it.album.equals(name, ignoreCase = true) }
-                                                    .sortedWith(com.example.model.AlbumTrackOrderComparator)
+                                    CompositionLocalProvider(LocalAnimatedVisibilityScope provides this@composable) {
+                                        val albumName = selectedAlbumForDetail ?: retainedAlbumForDetail
+                                        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F101E))) {
+                                            albumName?.let { name ->
+                                                val albumTracks = remember(name, allTracksList) {
+                                                    allTracksList
+                                                        .filter { it.album.equals(name, ignoreCase = true) }
+                                                        .sortedWith(com.example.model.AlbumTrackOrderComparator)
+                                                }
+                                                AlbumDetailScreen(
+                                                    albumName = name,
+                                                    tracks = albumTracks,
+                                                    currentTrack = currentTrack,
+                                                    isPlaying = isPlaying,
+                                                    accentColor = palette.accent,
+                                                    albumArtSize = settings.trackListAlbumArtSize,
+                                                    elementColors = settings.elementColors,
+                                                    listState = albumDetailListState,
+                                                    bottomContentPadding = navBarBottomPadding + 92.dp,
+                                                    enableBackHandler = false,
+                                                    onBack = { viewModel.selectAlbumForDetail(null) },
+                                                    onPlayFromContext = onPlayFromContext,
+                                                    onShuffleFromContext = onShuffleFromContext,
+                                                    onToggleFavorite = { viewModel.toggleFavorite(it.id) }
+                                                )
                                             }
-                                            AlbumDetailScreen(
-                                                albumName = name,
-                                                tracks = albumTracks,
-                                                currentTrack = currentTrack,
-                                                isPlaying = isPlaying,
-                                                accentColor = palette.accent,
-                                                albumArtSize = settings.trackListAlbumArtSize,
-                                                elementColors = settings.elementColors,
-                                                listState = albumDetailListState,
-                                                bottomContentPadding = navBarBottomPadding + 92.dp,
-                                                enableBackHandler = false,
-                                                onBack = { viewModel.selectAlbumForDetail(null) },
-                                                onPlayFromContext = onPlayFromContext,
-                                                onShuffleFromContext = onShuffleFromContext,
-                                                onToggleFavorite = { viewModel.toggleFavorite(it.id) }
-                                            )
                                         }
                                     }
                                 }
@@ -1042,28 +1304,40 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                             // Persistent Compact MiniPlayer across Cover Screen tabs, Album Details, and Artist Details
                             AnimatedVisibility(
                                 visible = !isPlayerExpanded,
-                                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
-                                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+                                enter = fadeIn(MotionSpecs.snappySpring()) + slideInVertically(
+                                    animationSpec = MotionSpecs.expressiveSpring(),
+                                    initialOffsetY = { it / 2 }
+                                ),
+                                exit = fadeOut(MotionSpecs.snappySpring()) + slideOutVertically(
+                                    animationSpec = MotionSpecs.expressiveSpring(),
+                                    targetOffsetY = { it / 2 }
+                                ),
                                 modifier = Modifier.align(Alignment.BottomCenter)
                             ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .windowInsetsPadding(WindowInsets.navigationBars)
-                                ) {
-                                    MiniPlayer(
-                                        track = currentTrack,
-                                        isPlaying = isPlaying,
-                                        currentPositionMs = currentPositionMs,
-                                        onExpand = { viewModel.expandPlayer() },
-                                        onTogglePlayPause = { viewModel.togglePlayPause() },
-                                        onNext = { viewModel.nextTrack() }
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                CompositionLocalProvider(LocalAnimatedVisibilityScope provides this@AnimatedVisibility) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .windowInsetsPadding(
+                                                WindowInsets.navigationBars.union(
+                                                    WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+                                                )
+                                            )
+                                    ) {
+                                        MiniPlayer(
+                                            track = currentTrack,
+                                            isPlaying = isPlaying,
+                                            currentPositionMs = currentPositionMs,
+                                            onExpand = { viewModel.expandPlayer() },
+                                            onTogglePlayPause = { viewModel.togglePlayPause() },
+                                            onNext = { viewModel.nextTrack() }
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                    }
                                 }
                             }
 
-                            // Full Now Playing Sheet (renders above tabs, detail screens, and MiniPlayer)
+                            // Full Now Playing Sheet (renders above tabs, detail screens, and MiniPlayer with SharedTransitionLayout morph)
                             AnimatedContent(
                                 targetState = isPlayerExpanded,
                                 transitionSpec = {
@@ -1077,7 +1351,8 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                 label = "now_playing_sheet_transition"
                             ) { expanded ->
                                 if (expanded) {
-                                    NowPlayingScreen(
+                                    CompositionLocalProvider(LocalAnimatedVisibilityScope provides this@AnimatedContent) {
+                                        NowPlayingScreen(
                                         track = currentTrack,
                                         isPlaying = isPlaying,
                                         currentPositionMs = currentPositionMs,
@@ -1113,12 +1388,21 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                                         lyricsGlowEnabled = settings.lyricsGlowEnabled,
                                         elementColors = settings.elementColors,
                                         isLoadingLyrics = isLoadingLyrics,
+                                        displayMode = displayMode,
+                                        onDisplayModeChange = { viewModel.setDisplayMode(it) },
+                                        enableAnimatedCovers = settings.enableAnimatedCovers,
+                                        autoFetchAnimatedCoversWifiOnly = settings.autoFetchAnimatedCoversWifiOnly,
+                                        simulateMotionOnStaticCovers = settings.simulateMotionOnStaticCovers,
+                                        onImportAnimatedCover = { uri -> viewModel.importAnimatedCover(context, currentTrack, uri) },
+                                        onRemoveCustomAnimatedCover = { viewModel.removeCustomAnimatedCover(context, currentTrack) },
                                         onImportLyricsUri = { uri -> viewModel.importLyricsFromUri(context, currentTrack, uri) },
                                         onSavePastedLyrics = { text -> viewModel.savePastedLyrics(context, currentTrack, text) },
                                         loadEditableLyrics = { viewModel.getEditableLyricsText(context, currentTrack) },
-                                        onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
-                                        onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) }
-                                    )
+                                            onRefetchLyrics = { viewModel.refetchLyricsOnline(context, currentTrack) },
+                                            onClearLyrics = { viewModel.clearTrackLyrics(context, currentTrack) },
+                                            enableSharedPlayerTransition = true
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1169,16 +1453,51 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                 label = "settings_screen_transition"
             ) { settingsOpen ->
                 if (settingsOpen) {
+                    val localTracks = remember(allTracksList) { allTracksList.filter { it.isLocalFile } }
+                    val duplicateTracksCount = remember(allTracksList) {
+                        MusicRepository.getInstance().findDuplicateLocalTracks().size
+                    }
                     SettingsScreen(
                         settings = settings,
                         accentColor = palette.accent,
                         onBack = { viewModel.closeSettings() },
                         onUpdateSettings = { viewModel.updateSettings(it) },
                         onOpenEqualizer = { viewModel.openEqualizer() },
-                        localTracksCount = tracks.count { it.isLocalFile },
-                        totalTracksCount = tracks.size,
+                        localTracksCount = localTracks.size,
+                        totalTracksCount = allTracksList.size,
                         onPickLocalFiles = onPickFiles,
                         onScanDeviceStorage = onScanStorage,
+                        localTracks = localTracks,
+                        duplicateTracksCount = duplicateTracksCount,
+                        recentImportBanner = recentImportBanner,
+                        onUndoLastImport = {
+                            viewModel.undoLastImport(context)
+                            Toast.makeText(context, "Undid last import", Toast.LENGTH_SHORT).show()
+                        },
+                        onRemoveLocalTrack = { trackId ->
+                            viewModel.removeTrack(context, trackId)
+                            Toast.makeText(context, "Removed track from library", Toast.LENGTH_SHORT).show()
+                        },
+                        onRemoveDuplicateTracks = {
+                            viewModel.removeDuplicateTracks(context) { removedCount ->
+                                val msg = if (removedCount > 0) {
+                                    "Merged $removedCount duplicate track${if (removedCount == 1) "" else "s"}"
+                                } else {
+                                    "No duplicate local tracks found"
+                                }
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onClearFilePickedImports = {
+                            viewModel.clearFilePickedImports(context) { removedCount ->
+                                val msg = if (removedCount > 0) {
+                                    "Removed $removedCount file-picked track${if (removedCount == 1) "" else "s"}"
+                                } else {
+                                    "No file-picked imports to remove"
+                                }
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        },
                         lyricsSyncUiState = lyricsSyncUiState,
                         onStartBatchLyricsSync = { viewModel.startBatchLyricsSync(context) },
                         onCancelBatchLyricsSync = { viewModel.cancelBatchLyricsSync(context) },
@@ -1197,6 +1516,29 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                 )
             }
 
+            // Floating Import Undo / Merge Summary Banner (visible outside Settings)
+            AnimatedVisibility(
+                visible = recentImportBanner != null && !isSettingsOpen,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(horizontal = 16.dp, vertical = 96.dp)
+            ) {
+                recentImportBanner?.let { banner ->
+                    ImportUndoSnackbarBanner(
+                        banner = banner,
+                        accentColor = palette.accent,
+                        onUndo = {
+                            viewModel.undoLastImport(context)
+                            Toast.makeText(context, "Undid last import", Toast.LENGTH_SHORT).show()
+                        },
+                        onDismiss = { viewModel.dismissImportBanner() }
+                    )
+                }
+            }
+
             // Global Long Press Tooltip HUD Banner
             OneUITooltipBanner(
                 text = currentTooltipHUD,
@@ -1205,7 +1547,206 @@ fun OneUIMusicApp(viewModel: MusicPlayerViewModel = viewModel()) {
                     .padding(bottom = 96.dp)
             )
         }
+        }
     }
+}
+
+@Composable
+private fun ImportUndoSnackbarBanner(
+    banner: ImportSummaryBanner,
+    accentColor: Color,
+    onUndo: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .widthIn(max = 560.dp)
+            .fillMaxWidth()
+            .glassmorphism(
+                shape = OneUIPillShape,
+                backgroundColor = Color(0xEC16192B),
+                borderWidth = 1.dp,
+                elevation = 10.dp
+            )
+            .border(1.2.dp, accentColor.copy(alpha = 0.5f), OneUIPillShape)
+            .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
+            .testTag("import_summary_floating_banner"),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.MusicNote,
+            contentDescription = null,
+            tint = accentColor,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = banner.summaryLabel,
+            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+            color = Color.White,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (banner.importedTrackIds.isNotEmpty()) {
+            TextButton(
+                onClick = onUndo,
+                modifier = Modifier
+                    .height(48.dp)
+                    .testTag("import_undo_banner_button"),
+                colors = ButtonDefaults.textButtonColors(contentColor = accentColor)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Undo,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Undo",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                )
+            }
+        }
+        IconButton(
+            onClick = onDismiss,
+            modifier = Modifier
+                .size(48.dp)
+                .testTag("import_dismiss_banner_button")
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Dismiss import notice",
+                tint = Color(0xAAFFFFFF),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrackActionDialog(
+    track: Track,
+    accentColor: Color,
+    onPlay: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onRemoveFromLibrary: (() -> Unit)?,
+    onDismiss: () -> Unit
+) {
+    val sourceLabel = when {
+        track.id.startsWith("local_") -> "File-Picked Import"
+        track.isLocalFile -> "Device Local Audio"
+        else -> "Built-in Library Track"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF171A2E),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xCCFFFFFF),
+        title = {
+            Column {
+                Text(
+                    text = track.title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "${track.artist} • ${track.album}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xAAFFFFFF),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = sourceLabel,
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = accentColor
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        onPlay()
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = accentColor
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Play Now",
+                        color = Color.White,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                TextButton(
+                    onClick = {
+                        onToggleFavorite()
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        tint = accentColor
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (track.isFavorite) "Remove from Favorites" else "Add to Favorites",
+                        color = Color.White,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                if (track.isLocalFile && onRemoveFromLibrary != null) {
+                    TextButton(
+                        onClick = {
+                            onRemoveFromLibrary()
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("track_context_remove_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = null,
+                            tint = Color(0xFFFF6B81)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Remove from Library",
+                            color = Color(0xFFFF6B81),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = accentColor)
+            }
+        }
+    )
 }
 
 /**
@@ -1596,20 +2137,28 @@ fun FilterChipsRow(
             .padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(FilterType.entries.toTypedArray()) { filter ->
+        items(FilterType.entries.toTypedArray(), key = { it.name }) { filter ->
             val isSelected = filter == selectedFilter
+            val chipBg by animateColorAsState(
+                targetValue = if (isSelected) accentColor.copy(alpha = 0.28f) else Color(0x18FFFFFF),
+                animationSpec = MotionSpecs.snappySpring(),
+                label = "filter_chip_bg_${filter.name}"
+            )
+            val chipBorder by animateColorAsState(
+                targetValue = if (isSelected) accentColor else Color.Transparent,
+                animationSpec = MotionSpecs.snappySpring(),
+                label = "filter_chip_border_${filter.name}"
+            )
             Box(
                 modifier = Modifier
                     .clip(OneUIPillShape)
-                    .background(
-                        if (isSelected) accentColor.copy(alpha = 0.28f) else Color(0x18FFFFFF)
-                    )
+                    .background(chipBg)
                     .border(
                         width = 1.dp,
-                        color = if (isSelected) accentColor else Color.Transparent,
+                        color = chipBorder,
                         shape = OneUIPillShape
                     )
-                    .clickable { onFilterSelected(filter) }
+                    .bouncableClick(pressedScale = 0.94f) { onFilterSelected(filter) }
                     .padding(horizontal = 12.dp, vertical = 6.dp)
                     .testTag("filter_chip_${filter.name.lowercase()}"),
                 contentAlignment = Alignment.Center
@@ -1703,7 +2252,7 @@ fun SortOptionsDialog(
                             .fillMaxWidth()
                             .clip(OneUIPillShape)
                             .background(if (isSelected) accentColor.copy(alpha = 0.25f) else Color(0x12FFFFFF))
-                            .clickable {
+                            .bouncableClick(pressedScale = 0.97f) {
                                 onSortSelected(option)
                                 onDismiss()
                             }
@@ -1736,7 +2285,7 @@ fun SortOptionsDialog(
                 text = "Close",
                 color = accentColor,
                 modifier = Modifier
-                    .clickable(onClick = onDismiss)
+                    .bouncableClick(onClick = onDismiss)
                     .padding(8.dp)
             )
         },
@@ -1758,15 +2307,18 @@ fun OneUITabBar(
             .padding(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(MusicTab.entries.toTypedArray()) { tab ->
+        items(MusicTab.entries.toTypedArray(), key = { it.name }) { tab ->
             val isSelected = tab == selectedTab
+            val tabBg by animateColorAsState(
+                targetValue = if (isSelected) tabHighlightColor else Color(0x22FFFFFF),
+                animationSpec = MotionSpecs.snappySpring(),
+                label = "tab_pill_bg_${tab.name}"
+            )
             Box(
                 modifier = Modifier
                     .clip(OneUIPillShape)
-                    .background(
-                        if (isSelected) tabHighlightColor else Color(0x22FFFFFF)
-                    )
-                    .clickable { onTabSelected(tab) }
+                    .background(tabBg)
+                    .bouncableClick(pressedScale = 0.94f) { onTabSelected(tab) }
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .testTag("tab_${tab.name.lowercase()}")
             ) {
@@ -1797,9 +2349,25 @@ fun TracksTabContent(
     },
     onToggleFavorite: (Track) -> Unit,
     onPickLocalFiles: () -> Unit = {},
-    onScanDeviceStorage: () -> Unit = {}
+    onScanDeviceStorage: () -> Unit = {},
+    onRemoveLocalTrack: ((Track) -> Unit)? = null
 ) {
     val coroutineScope = rememberCoroutineScope()
+    var selectedTrackForMenu by remember { mutableStateOf<Track?>(null) }
+
+    selectedTrackForMenu?.let { menuTrack ->
+        TrackActionDialog(
+            track = menuTrack,
+            accentColor = accentColor,
+            onPlay = {
+                val idx = tracks.indexOfFirst { it.id == menuTrack.id }
+                if (idx >= 0) onPlayFromContext(tracks, idx) else onTrackClick(menuTrack)
+            },
+            onToggleFavorite = { onToggleFavorite(menuTrack) },
+            onRemoveFromLibrary = onRemoveLocalTrack?.let { removeCb -> { removeCb(menuTrack) } },
+            onDismiss = { selectedTrackForMenu = null }
+        )
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -1809,17 +2377,22 @@ fun TracksTabContent(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Featured Hero Banner
-            item {
+            item(key = "featured_hero_banner") {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .animateItem(
+                            fadeInSpec = MotionSpecs.snappySpring(),
+                            placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                            fadeOutSpec = MotionSpecs.snappySpring()
+                        )
                         .glassmorphism(
                             shape = OneUISquircleLarge,
                             backgroundColor = Color(0x35232742),
                             borderWidth = 1.2.dp,
                             elevation = 8.dp
                         )
-                        .clickable {
+                        .bouncableClick(pressedScale = 0.97f) {
                             val idx = tracks.indexOfFirst { it.id == currentTrack.id }
                             if (idx >= 0) onPlayFromContext(tracks, idx) else onTrackClick(currentTrack)
                         }
@@ -1864,7 +2437,10 @@ fun TracksTabContent(
                                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                                 color = Color.White,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .basicMarquee(iterations = Int.MAX_VALUE)
                             )
                             Text(
                                 text = "${currentTrack.artist} • ${currentTrack.genre}",
@@ -1882,17 +2458,23 @@ fun TracksTabContent(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(44.dp)
+                                    .size(48.dp)
                                     .clip(CircleShape)
                                     .background(accentColor),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Default.Equalizer else Icons.Default.PlayArrow,
-                                    contentDescription = "Play",
-                                    tint = Color(0xFF0C0E1A),
-                                    modifier = Modifier.size(24.dp)
-                                )
+                                AnimatedContent(
+                                    targetState = isPlaying,
+                                    transitionSpec = { MotionSpecs.iconMorphTransition() },
+                                    label = "hero_card_play_morph"
+                                ) { playing ->
+                                    Icon(
+                                        imageVector = if (playing) Icons.Default.Equalizer else Icons.Default.PlayArrow,
+                                        contentDescription = "Play",
+                                        tint = Color(0xFF0C0E1A),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1906,8 +2488,14 @@ fun TracksTabContent(
                     isPlaying = isPlaying,
                     onTrackClick = { onPlayFromContext(tracks, index) },
                     onToggleFavorite = { onToggleFavorite(track) },
+                    onLongClick = { selectedTrackForMenu = track },
                     albumArtSize = albumArtSize,
-                    elementColors = elementColors
+                    elementColors = elementColors,
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = MotionSpecs.snappySpring(),
+                        placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                        fadeOutSpec = MotionSpecs.snappySpring()
+                    )
                 )
             }
         }
@@ -1955,17 +2543,22 @@ fun PlaylistsTabContent(
             contentPadding = PaddingValues(start = 16.dp, end = 38.dp, top = 12.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            items(playlists) { playlist ->
+            items(playlists, key = { it.id }) { playlist ->
                 val playlistTracks = allTracks.filter { playlist.trackIds.contains(it.id) }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .animateItem(
+                            fadeInSpec = MotionSpecs.snappySpring(),
+                            placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                            fadeOutSpec = MotionSpecs.snappySpring()
+                        )
                         .glassmorphism(
                             shape = OneUISquircleLarge,
                             backgroundColor = Color(0x35232742),
                             borderWidth = 1.dp
                         )
-                        .clickable {
+                        .bouncableClick(pressedScale = 0.97f) {
                             if (playlistTracks.isNotEmpty()) {
                                 onPlayFromContext(playlistTracks, 0)
                             }
@@ -2033,7 +2626,7 @@ fun PlaylistsTabContent(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { onPlayFromContext(playlistTracks, idx) }
+                                        .bouncableClick(pressedScale = 0.97f) { onPlayFromContext(playlistTracks, idx) }
                                         .padding(vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -2118,17 +2711,22 @@ fun AlbumsTabContent(
                 contentPadding = PaddingValues(start = 16.dp, end = 38.dp, top = 12.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(albums) { (albumName, albumTracks) ->
+                items(albums, key = { it.first }) { (albumName, albumTracks) ->
                     val leadTrack = albumTracks.first()
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .animateItem(
+                                fadeInSpec = MotionSpecs.snappySpring(),
+                                placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                                fadeOutSpec = MotionSpecs.snappySpring()
+                            )
                             .glassmorphism(
                                 shape = OneUISquircleMedium,
                                 backgroundColor = Color(0x281F223A),
                                 borderWidth = 1.dp
                             )
-                            .clickable { onSelectAlbum(albumName) }
+                            .bouncableClick(pressedScale = 0.96f) { onSelectAlbum(albumName) }
                             .padding(12.dp)
                     ) {
                         Row(
@@ -2140,7 +2738,8 @@ fun AlbumsTabContent(
                                 size = 60.dp,
                                 cornerRadius = 14.dp,
                                 isPlaying = false,
-                                showVinylPeek = false
+                                showVinylPeek = false,
+                                artSharedElementKey = "album_art_$albumName"
                             )
                             Spacer(modifier = Modifier.width(14.dp))
                             Column(modifier = Modifier.weight(1f)) {
@@ -2149,7 +2748,11 @@ fun AlbumsTabContent(
                                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                     color = Color.White,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.appSharedBounds(
+                                        key = "album_title_$albumName",
+                                        useScaleToBounds = true
+                                    )
                                 )
                                 Text(
                                     text = "${leadTrack.artist} • ${leadTrack.genre}",
@@ -2178,17 +2781,22 @@ fun AlbumsTabContent(
                 horizontalArrangement = Arrangement.spacedBy(if (cols == 3) 10.dp else 14.dp),
                 verticalArrangement = Arrangement.spacedBy(if (cols == 3) 10.dp else 14.dp)
             ) {
-                items(albums) { (albumName, albumTracks) ->
+                items(albums, key = { it.first }) { (albumName, albumTracks) ->
                     val leadTrack = albumTracks.first()
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .animateItem(
+                                fadeInSpec = MotionSpecs.snappySpring(),
+                                placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                                fadeOutSpec = MotionSpecs.snappySpring()
+                            )
                             .glassmorphism(
                                 shape = OneUISquircleLarge,
                                 backgroundColor = Color(0x2D21243D),
                                 borderWidth = 1.dp
                             )
-                            .clickable { onSelectAlbum(albumName) }
+                            .bouncableClick(pressedScale = 0.95f) { onSelectAlbum(albumName) }
                             .padding(if (cols == 3) 8.dp else 12.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -2203,7 +2811,8 @@ fun AlbumsTabContent(
                                     size = targetArtSize,
                                     cornerRadius = if (cols == 3) 16.dp else 22.dp,
                                     isPlaying = false,
-                                    showVinylPeek = false
+                                    showVinylPeek = false,
+                                    artSharedElementKey = "album_art_$albumName"
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
@@ -2214,7 +2823,12 @@ fun AlbumsTabContent(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     textAlign = TextAlign.Center,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .appSharedBounds(
+                                            key = "album_title_$albumName",
+                                            useScaleToBounds = true
+                                        )
                                 )
                                 Text(
                                     text = "${leadTrack.artist} • ${albumTracks.size} Tracks",
@@ -2286,17 +2900,22 @@ fun ArtistsTabContent(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            items(artists) { (artistName, artistTracks) ->
+            items(artists, key = { it.first }) { (artistName, artistTracks) ->
                 val lead = artistTracks.first()
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .animateItem(
+                            fadeInSpec = MotionSpecs.snappySpring(),
+                            placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                            fadeOutSpec = MotionSpecs.snappySpring()
+                        )
                         .glassmorphism(
                             shape = OneUISquircleLarge,
                             backgroundColor = Color(0x2D21243D),
                             borderWidth = 1.dp
                         )
-                        .clickable { onSelectArtist(artistName) }
+                        .bouncableClick(pressedScale = 0.95f) { onSelectArtist(artistName) }
                         .padding(12.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -2311,7 +2930,8 @@ fun ArtistsTabContent(
                                 size = targetArtSize,
                                 cornerRadius = 22.dp,
                                 isPlaying = false,
-                                showVinylPeek = false
+                                showVinylPeek = false,
+                                artSharedElementKey = "artist_art_$artistName"
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
@@ -2321,7 +2941,12 @@ fun ArtistsTabContent(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .appSharedBounds(
+                                        key = "artist_title_$artistName",
+                                        useScaleToBounds = true
+                                    )
                             )
                             Text(
                                 text = "${lead.genre} • ${artistTracks.size} Tracks",
@@ -2372,9 +2997,26 @@ fun FavoritesTabContent(
     onPlayFromContext: (List<Track>, Int) -> Unit = { list, idx ->
         if (idx in list.indices) onTrackClick(list[idx])
     },
-    onToggleFavorite: (Track) -> Unit
+    onToggleFavorite: (Track) -> Unit,
+    onRemoveLocalTrack: ((Track) -> Unit)? = null
 ) {
     val coroutineScope = rememberCoroutineScope()
+    var selectedTrackForMenu by remember { mutableStateOf<Track?>(null) }
+
+    selectedTrackForMenu?.let { menuTrack ->
+        TrackActionDialog(
+            track = menuTrack,
+            accentColor = accentColor,
+            onPlay = {
+                val idx = tracks.indexOfFirst { it.id == menuTrack.id }
+                if (idx >= 0) onPlayFromContext(tracks, idx) else onTrackClick(menuTrack)
+            },
+            onToggleFavorite = { onToggleFavorite(menuTrack) },
+            onRemoveFromLibrary = onRemoveLocalTrack?.let { removeCb -> { removeCb(menuTrack) } },
+            onDismiss = { selectedTrackForMenu = null }
+        )
+    }
+
     if (tracks.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -2415,8 +3057,14 @@ fun FavoritesTabContent(
                         isPlaying = isPlaying,
                         onTrackClick = { onPlayFromContext(tracks, index) },
                         onToggleFavorite = { onToggleFavorite(track) },
+                        onLongClick = { selectedTrackForMenu = track },
                         albumArtSize = albumArtSize,
-                        elementColors = elementColors
+                        elementColors = elementColors,
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = MotionSpecs.snappySpring(),
+                            placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                            fadeOutSpec = MotionSpecs.snappySpring()
+                        )
                     )
                 }
             }

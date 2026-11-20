@@ -1,6 +1,12 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,10 +19,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
@@ -40,7 +45,9 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -84,9 +91,12 @@ import com.example.FavoritesTabContent
 import com.example.PlaylistsTabContent
 import com.example.TracksTabContent
 import com.example.ui.theme.ExpressivePalette
+import com.example.ui.theme.LocalAnimatedVisibilityScope
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.NavigationTransitions
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
+import com.example.ui.theme.bouncableClick
 import com.example.ui.theme.glassmorphism
 
 private data class DualPaneMiddleState(
@@ -170,25 +180,41 @@ fun ExpandedDualPaneScreen(
     lyricsAnimationSpeed: LyricsAnimationSpeed = LyricsAnimationSpeed.BALANCED,
     lyricsGlowEnabled: Boolean = true,
     isLoadingLyrics: Boolean = false,
+    displayMode: DisplayMode = DisplayMode.ARTWORK,
+    onDisplayModeChange: (DisplayMode) -> Unit = {},
+    enableAnimatedCovers: Boolean = true,
+    autoFetchAnimatedCoversWifiOnly: Boolean = true,
+    simulateMotionOnStaticCovers: Boolean = true,
+    onImportAnimatedCover: (android.net.Uri) -> Unit = {},
+    onRemoveCustomAnimatedCover: () -> Unit = {},
     onImportLyricsUri: (android.net.Uri) -> Unit = {},
     onSavePastedLyrics: (String) -> Unit = {},
     loadEditableLyrics: (suspend () -> String)? = null,
     onRefetchLyrics: (() -> Unit)? = null,
     onClearLyrics: (() -> Unit)? = null,
+    onRemoveLocalTrack: ((Track) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val isInnerSubscreen = selectedAlbumId != null || selectedArtistId != null || searchQuery.isNotEmpty()
+    var dockedLyricsEditorTab by rememberSaveable { mutableStateOf<LyricsEditorTab?>(null) }
+    var lastDockedEditorTab by rememberSaveable { mutableStateOf(LyricsEditorTab.PASTE_EDIT) }
+    var dockedEditorRequestSeq by rememberSaveable { mutableIntStateOf(0) }
+    val openDockedLyricsEditor: (LyricsEditorTab) -> Unit = { tab ->
+        lastDockedEditorTab = tab
+        dockedLyricsEditorTab = tab
+        dockedEditorRequestSeq += 1
+    }
+    val isLyricsStudioDocked = dockedLyricsEditorTab != null
+    val isInnerSubscreen = isLyricsStudioDocked || selectedAlbumId != null || selectedArtistId != null || searchQuery.isNotEmpty()
 
-    // Subscreen predictive back: only active when inside an album/artist detail or active search
+    // Subscreen predictive back: closes docked Lyrics Studio, album/artist detail, or search
     PredictiveBackHandler(enabled = isInnerSubscreen) { progress ->
         try {
             progress.collect { }
-            if (selectedAlbumId != null) {
-                onSelectAlbumForDetail(null)
-            } else if (selectedArtistId != null) {
-                onSelectArtistForDetail(null)
-            } else if (searchQuery.isNotEmpty()) {
-                onSearchQueryChange("")
+            when {
+                dockedLyricsEditorTab != null -> dockedLyricsEditorTab = null
+                selectedAlbumId != null -> onSelectAlbumForDetail(null)
+                selectedArtistId != null -> onSelectArtistForDetail(null)
+                searchQuery.isNotEmpty() -> onSearchQueryChange("")
             }
         } catch (_: CancellationException) { }
     }
@@ -205,8 +231,7 @@ fun ExpandedDualPaneScreen(
     Row(
         modifier = modifier
             .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
     ) {
         val railBg = parseHexColor(elementColors.railBackground) ?: Color(0x3015182C)
         val railHeaderColor = parseHexColor(elementColors.railHeaderIcon) ?: palette.primary
@@ -258,8 +283,11 @@ fun ExpandedDualPaneScreen(
                     MusicTab.FAVORITES -> Icons.Default.Favorite
                 }
                 NavigationRailItem(
-                    selected = selectedTab == tab,
-                    onClick = { onTabSelected(tab) },
+                    selected = !isLyricsStudioDocked && selectedTab == tab,
+                    onClick = {
+                        dockedLyricsEditorTab = null
+                        onTabSelected(tab)
+                    },
                     icon = { Icon(icon, contentDescription = tab.title) },
                     label = {
                         Text(
@@ -337,215 +365,301 @@ fun ExpandedDualPaneScreen(
         Spacer(modifier = Modifier.width(10.dp))
 
         // ==========================================
-        // MIDDLE: Library Content Pane (46% width)
+        // MIDDLE: Library Content Pane OR Active Player when Lyrics Studio is docked
         // ==========================================
-        Column(
+        AnimatedContent(
+            targetState = isLyricsStudioDocked,
+            transitionSpec = {
+                if (targetState) {
+                    (slideInHorizontally(MotionSpecs.expressiveSpring()) { it / 3 } + fadeIn(MotionSpecs.snappySpring())) togetherWith
+                        (slideOutHorizontally(MotionSpecs.expressiveSpring()) { -it / 3 } + fadeOut(MotionSpecs.snappySpring()))
+                } else {
+                    (slideInHorizontally(MotionSpecs.expressiveSpring()) { -it / 3 } + fadeIn(MotionSpecs.snappySpring())) togetherWith
+                        (slideOutHorizontally(MotionSpecs.expressiveSpring()) { it / 3 } + fadeOut(MotionSpecs.snappySpring()))
+                }
+            },
+            label = "DualPaneMiddleSlotSwap",
             modifier = Modifier
                 .weight(1.05f)
                 .fillMaxHeight()
-                .padding(top = 8.dp, bottom = 8.dp)
-        ) {
-            // Header with search & Dolby
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = selectedTab.title,
-                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
-                    color = Color.White
-                )
-
+        ) { studioOpen ->
+            if (studioOpen) {
                 Box(
                     modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 8.dp, bottom = 8.dp)
                         .glassmorphism(
-                            shape = OneUIPillShape,
-                            backgroundColor = if (dolbyAtmosEnabled) Color(0x357C4DFF) else Color(0x20FFFFFF),
-                            borderWidth = 0.8.dp
+                            shape = OneUISquircleLarge,
+                            backgroundColor = Color(0x3517192D),
+                            borderWidth = 1.2.dp,
+                            elevation = 12.dp
                         )
-                        .clickable(onClick = onOpenEqualizer)
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("dual_pane_player_shifted_pane")
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.SurroundSound,
-                            contentDescription = "Dolby Atmos",
-                            tint = if (dolbyAtmosEnabled) palette.accent else Color(0x88FFFFFF),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                    NowPlayingScreen(
+                        track = currentTrack,
+                        isPlaying = isPlaying,
+                        currentPositionMs = currentPositionMs,
+                        visualizerAmplitudes = visualizerAmplitudes,
+                        isShuffleActive = isShuffleActive,
+                        repeatMode = repeatMode,
+                        volume = volume,
+                        speed = speed,
+                        sleepTimerMinutesLeft = sleepTimerMinutesLeft,
+                        onCollapse = { /* In dual-pane mode, player stays persistent */ },
+                        onTogglePlayPause = onTogglePlayPause,
+                        onNext = onNext,
+                        onPrevious = onPrevious,
+                        onSeek = onSeek,
+                        onToggleShuffle = onToggleShuffle,
+                        onCycleRepeat = onCycleRepeat,
+                        onToggleFavorite = { onToggleFavorite(currentTrack.id) },
+                        onVolumeChange = onVolumeChange,
+                        onSpeedChange = onSpeedChange,
+                        onOpenEqualizer = onOpenEqualizer,
+                        onOpenSleepTimer = onOpenSleepTimer,
+                        progressBarDesign = progressBarDesign,
+                        playerButtonSize = playerButtonSize,
+                        visualizerAlbumArtSize = visualizerAlbumArtSize,
+                        progressBarThickness = progressBarThickness,
+                        visualizerStyle = visualizerStyle,
+                        onVisualizerStyleChange = onVisualizerStyleChange,
+                        elementColors = elementColors,
+                        buttonAnimationEffect = buttonAnimationEffect,
+                        lyricsAnimationStyle = lyricsAnimationStyle,
+                        lyricsAnimationSpeed = lyricsAnimationSpeed,
+                        lyricsGlowEnabled = lyricsGlowEnabled,
+                        isCollapsible = false,
+                        isLoadingLyrics = isLoadingLyrics,
+                        displayMode = displayMode,
+                        onDisplayModeChange = onDisplayModeChange,
+                        enableAnimatedCovers = enableAnimatedCovers,
+                        autoFetchAnimatedCoversWifiOnly = autoFetchAnimatedCoversWifiOnly,
+                        simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                        onImportAnimatedCover = onImportAnimatedCover,
+                        onRemoveCustomAnimatedCover = onRemoveCustomAnimatedCover,
+                        onImportLyricsUri = onImportLyricsUri,
+                        onSavePastedLyrics = onSavePastedLyrics,
+                        loadEditableLyrics = loadEditableLyrics,
+                        onRefetchLyrics = onRefetchLyrics,
+                        onClearLyrics = onClearLyrics,
+                        onOpenExternalLyricsEditor = openDockedLyricsEditor,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 8.dp, bottom = 8.dp)
+                ) {
+                    // Header with search & Dolby
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
                         Text(
-                            text = if (dolbyAtmosEnabled) "Atmos 3D" else "Stereo",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            text = selectedTab.title,
+                            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
                             color = Color.White
                         )
+
+                        Box(
+                            modifier = Modifier
+                                .glassmorphism(
+                                    shape = OneUIPillShape,
+                                    backgroundColor = if (dolbyAtmosEnabled) Color(0x357C4DFF) else Color(0x20FFFFFF),
+                                    borderWidth = 0.8.dp
+                                )
+                                .bouncableClick(pressedScale = 0.94f, onClick = onOpenEqualizer)
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.SurroundSound,
+                                    contentDescription = "Dolby Atmos",
+                                    tint = if (dolbyAtmosEnabled) palette.accent else Color(0x88FFFFFF),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (dolbyAtmosEnabled) "Atmos 3D" else "Stereo",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = Color.White
+                                )
+                            }
+                        }
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
-            // Filtering and sorting options across all tabs in dual-pane layout
-            FilterChipsRow(
-                selectedFilter = activeFilter,
-                accentColor = palette.accent,
-                onFilterSelected = onFilterSelected
-            )
-
-            SortBarRow(
-                totalCount = tracks.size,
-                selectedSort = sortOption,
-                accentColor = palette.accent,
-                onOpenSortDialog = onOpenSortDialog
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Library & Detail Pane (only this pane animates during tab/detail navigation; rail and player stay fixed)
-            val middlePaneState = when {
-                selectedAlbumId != null -> DualPaneMiddleState(depth = 2, albumId = selectedAlbumId, artistId = selectedArtistId)
-                selectedArtistId != null -> DualPaneMiddleState(depth = 1, albumId = null, artistId = selectedArtistId)
-                else -> DualPaneMiddleState(depth = 0, albumId = null, artistId = null)
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .glassmorphism(
-                        shape = OneUISquircleLarge,
-                        backgroundColor = Color(0x28191B2F),
-                        borderWidth = 1.dp
+                    // Filtering and sorting options across all tabs in dual-pane layout
+                    FilterChipsRow(
+                        selectedFilter = activeFilter,
+                        accentColor = palette.accent,
+                        onFilterSelected = onFilterSelected
                     )
-            ) {
-                AnimatedContent(
-                    targetState = middlePaneState,
-                    transitionSpec = {
-                        NavigationTransitions.hierarchicalContentTransform(
-                            scope = this,
-                            isForward = targetState.depth >= initialState.depth
-                        )
-                    },
-                    label = "DualPaneMiddleTransition",
-                    modifier = Modifier.fillMaxSize()
-                ) { paneState ->
-                    if (paneState.albumId != null) {
-                        val albumTracks = remember(paneState.albumId, allTracks) {
-                            allTracks
-                                .filter { it.album.equals(paneState.albumId, ignoreCase = true) }
-                                .sortedWith(com.example.model.AlbumTrackOrderComparator)
-                        }
-                        AlbumDetailScreen(
-                            albumName = paneState.albumId,
-                            tracks = albumTracks,
-                            currentTrack = currentTrack,
-                            isPlaying = isPlaying,
-                            accentColor = palette.accent,
-                            albumArtSize = albumArtSize,
-                            elementColors = elementColors,
-                            listState = albumDetailListState,
-                            enableBackHandler = false,
-                            onBack = { onSelectAlbumForDetail(null) },
-                            onPlayFromContext = onPlayFromContext,
-                            onShuffleFromContext = onShuffleFromContext,
-                            onToggleFavorite = { onToggleFavorite(it.id) }
-                        )
-                    } else if (paneState.artistId != null) {
-                        val artistTracks = remember(paneState.artistId, allTracks) {
-                            allTracks.filter { it.artist.equals(paneState.artistId, ignoreCase = true) }
-                        }
-                        ArtistDetailScreen(
-                            artistName = paneState.artistId,
-                            tracks = artistTracks,
-                            currentTrack = currentTrack,
-                            isPlaying = isPlaying,
-                            accentColor = palette.accent,
-                            albumArtSize = albumArtSize,
-                            elementColors = elementColors,
-                            listState = artistDetailListState,
-                            albumsRowState = artistDetailAlbumsRowState,
-                            enableBackHandler = false,
-                            onBack = { onSelectArtistForDetail(null) },
-                            onSelectAlbum = { onSelectAlbumForDetail(it) },
-                            onPlayFromContext = onPlayFromContext,
-                            onShuffleFromContext = onShuffleFromContext,
-                            onToggleFavorite = { onToggleFavorite(it.id) }
-                        )
-                    } else {
+
+                    SortBarRow(
+                        totalCount = tracks.size,
+                        selectedSort = sortOption,
+                        accentColor = palette.accent,
+                        onOpenSortDialog = onOpenSortDialog
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Library & Detail Pane (only this pane animates during tab/detail navigation; rail and player stay fixed)
+                    val middlePaneState = when {
+                        selectedAlbumId != null -> DualPaneMiddleState(depth = 2, albumId = selectedAlbumId, artistId = selectedArtistId)
+                        selectedArtistId != null -> DualPaneMiddleState(depth = 1, albumId = null, artistId = selectedArtistId)
+                        else -> DualPaneMiddleState(depth = 0, albumId = null, artistId = null)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .glassmorphism(
+                                shape = OneUISquircleLarge,
+                                backgroundColor = Color(0x28191B2F),
+                                borderWidth = 1.dp
+                            )
+                    ) {
                         AnimatedContent(
-                            targetState = selectedTab,
-                            transitionSpec = { NavigationTransitions.tabFadeThrough() },
-                            label = "DualPaneTabFadeThrough",
+                            targetState = middlePaneState,
+                            transitionSpec = {
+                                NavigationTransitions.hierarchicalContentTransform(
+                                    scope = this,
+                                    isForward = targetState.depth >= initialState.depth
+                                )
+                            },
+                            label = "DualPaneMiddleTransition",
                             modifier = Modifier.fillMaxSize()
-                        ) { tab ->
-                            when (tab) {
-                                MusicTab.TRACKS -> {
-                                    TracksTabContent(
-                                        tracks = tracks,
-                                        currentTrack = currentTrack,
-                                        isPlaying = isPlaying,
-                                        accentColor = palette.accent,
-                                        albumArtSize = albumArtSize,
-                                        elementColors = elementColors,
-                                        listState = tabListStates[MusicTab.TRACKS] ?: tracksListState,
-                                        onTrackClick = onTrackClick,
-                                        onPlayFromContext = onPlayFromContext,
-                                        onToggleFavorite = { trackItem -> onToggleFavorite(trackItem.id) },
-                                        onPickLocalFiles = onPickLocalFiles,
-                                        onScanDeviceStorage = onScanDeviceStorage
-                                    )
+                        ) { paneState ->
+                            CompositionLocalProvider(LocalAnimatedVisibilityScope provides this@AnimatedContent) {
+                            if (paneState.albumId != null) {
+                                val albumTracks = remember(paneState.albumId, allTracks) {
+                                    allTracks
+                                        .filter { it.album.equals(paneState.albumId, ignoreCase = true) }
+                                        .sortedWith(com.example.model.AlbumTrackOrderComparator)
                                 }
-                                MusicTab.PLAYLISTS -> {
-                                    PlaylistsTabContent(
-                                        playlists = playlists,
-                                        allTracks = allTracks,
-                                        currentTrack = currentTrack,
-                                        accentColor = palette.accent,
-                                        listState = tabListStates[MusicTab.PLAYLISTS]
-                                            ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
-                                        onPlayTrack = onTrackClick,
-                                        onPlayFromContext = onPlayFromContext
-                                    )
+                                AlbumDetailScreen(
+                                    albumName = paneState.albumId,
+                                    tracks = albumTracks,
+                                    currentTrack = currentTrack,
+                                    isPlaying = isPlaying,
+                                    accentColor = palette.accent,
+                                    albumArtSize = albumArtSize,
+                                    elementColors = elementColors,
+                                    listState = albumDetailListState,
+                                    enableBackHandler = false,
+                                    onBack = { onSelectAlbumForDetail(null) },
+                                    onPlayFromContext = onPlayFromContext,
+                                    onShuffleFromContext = onShuffleFromContext,
+                                    onToggleFavorite = { onToggleFavorite(it.id) }
+                                )
+                            } else if (paneState.artistId != null) {
+                                val artistTracks = remember(paneState.artistId, allTracks) {
+                                    allTracks.filter { it.artist.equals(paneState.artistId, ignoreCase = true) }
                                 }
-                                MusicTab.ALBUMS -> {
-                                    AlbumsTabContent(
-                                        tracks = allTracks,
-                                        layoutSetting = albumLayoutSetting,
-                                        sortOption = sortOption,
-                                        accentColor = palette.accent,
-                                        listState = tabListStates[MusicTab.ALBUMS]
-                                            ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
-                                        gridState = albumsGridState,
-                                        onSelectAlbum = { onSelectAlbumForDetail(it) },
-                                        onSelectTrack = onTrackClick
-                                    )
+                                ArtistDetailScreen(
+                                    artistName = paneState.artistId,
+                                    tracks = artistTracks,
+                                    currentTrack = currentTrack,
+                                    isPlaying = isPlaying,
+                                    accentColor = palette.accent,
+                                    albumArtSize = albumArtSize,
+                                    elementColors = elementColors,
+                                    listState = artistDetailListState,
+                                    albumsRowState = artistDetailAlbumsRowState,
+                                    enableBackHandler = false,
+                                    onBack = { onSelectArtistForDetail(null) },
+                                    onSelectAlbum = { onSelectAlbumForDetail(it) },
+                                    onPlayFromContext = onPlayFromContext,
+                                    onShuffleFromContext = onShuffleFromContext,
+                                    onToggleFavorite = { onToggleFavorite(it.id) }
+                                )
+                            } else {
+                                AnimatedContent(
+                                    targetState = selectedTab,
+                                    transitionSpec = { NavigationTransitions.tabFadeThrough() },
+                                    label = "DualPaneTabFadeThrough",
+                                    modifier = Modifier.fillMaxSize()
+                                ) { tab ->
+                                    when (tab) {
+                                        MusicTab.TRACKS -> {
+                                            TracksTabContent(
+                                                tracks = tracks,
+                                                currentTrack = currentTrack,
+                                                isPlaying = isPlaying,
+                                                accentColor = palette.accent,
+                                                albumArtSize = albumArtSize,
+                                                elementColors = elementColors,
+                                                listState = tabListStates[MusicTab.TRACKS] ?: tracksListState,
+                                                onTrackClick = onTrackClick,
+                                                onPlayFromContext = onPlayFromContext,
+                                                onToggleFavorite = { trackItem -> onToggleFavorite(trackItem.id) },
+                                                onPickLocalFiles = onPickLocalFiles,
+                                                onScanDeviceStorage = onScanDeviceStorage,
+                                                onRemoveLocalTrack = onRemoveLocalTrack
+                                            )
+                                        }
+                                        MusicTab.PLAYLISTS -> {
+                                            PlaylistsTabContent(
+                                                playlists = playlists,
+                                                allTracks = allTracks,
+                                                currentTrack = currentTrack,
+                                                accentColor = palette.accent,
+                                                listState = tabListStates[MusicTab.PLAYLISTS]
+                                                    ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
+                                                onPlayTrack = onTrackClick,
+                                                onPlayFromContext = onPlayFromContext
+                                            )
+                                        }
+                                        MusicTab.ALBUMS -> {
+                                            AlbumsTabContent(
+                                                tracks = allTracks,
+                                                layoutSetting = albumLayoutSetting,
+                                                sortOption = sortOption,
+                                                accentColor = palette.accent,
+                                                listState = tabListStates[MusicTab.ALBUMS]
+                                                    ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
+                                                gridState = albumsGridState,
+                                                onSelectAlbum = { onSelectAlbumForDetail(it) },
+                                                onSelectTrack = onTrackClick
+                                            )
+                                        }
+                                        MusicTab.ARTISTS -> {
+                                            ArtistsTabContent(
+                                                tracks = allTracks,
+                                                sortOption = sortOption,
+                                                accentColor = palette.accent,
+                                                gridState = artistsGridState,
+                                                onSelectArtist = { onSelectArtistForDetail(it) },
+                                                onSelectTrack = onTrackClick
+                                            )
+                                        }
+                                        MusicTab.FAVORITES -> {
+                                            FavoritesTabContent(
+                                                tracks = favoriteTracks,
+                                                currentTrack = currentTrack,
+                                                isPlaying = isPlaying,
+                                                accentColor = palette.accent,
+                                                albumArtSize = albumArtSize,
+                                                elementColors = elementColors,
+                                                listState = tabListStates[MusicTab.FAVORITES]
+                                                    ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
+                                                onTrackClick = onTrackClick,
+                                                onPlayFromContext = onPlayFromContext,
+                                                onToggleFavorite = { trackItem -> onToggleFavorite(trackItem.id) },
+                                                onRemoveLocalTrack = onRemoveLocalTrack
+                                            )
+                                        }
+                                    }
                                 }
-                                MusicTab.ARTISTS -> {
-                                    ArtistsTabContent(
-                                        tracks = allTracks,
-                                        sortOption = sortOption,
-                                        accentColor = palette.accent,
-                                        gridState = artistsGridState,
-                                        onSelectArtist = { onSelectArtistForDetail(it) },
-                                        onSelectTrack = onTrackClick
-                                    )
-                                }
-                                MusicTab.FAVORITES -> {
-                                    FavoritesTabContent(
-                                        tracks = favoriteTracks,
-                                        currentTrack = currentTrack,
-                                        isPlaying = isPlaying,
-                                        accentColor = palette.accent,
-                                        albumArtSize = albumArtSize,
-                                        elementColors = elementColors,
-                                        listState = tabListStates[MusicTab.FAVORITES]
-                                            ?: rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
-                                        onTrackClick = onTrackClick,
-                                        onPlayFromContext = onPlayFromContext,
-                                        onToggleFavorite = { trackItem -> onToggleFavorite(trackItem.id) }
-                                    )
-                                }
+                            }
                             }
                         }
                     }
@@ -556,62 +670,103 @@ fun ExpandedDualPaneScreen(
         Spacer(modifier = Modifier.width(10.dp))
 
         // ==========================================
-        // RIGHT: Persistent Now Playing Studio Pane (54% width)
+        // RIGHT: Persistent Now Playing Studio Pane OR Docked Add/Edit Lyrics Studio Pane
         // ==========================================
-        Box(
+        AnimatedContent(
+            targetState = isLyricsStudioDocked,
+            transitionSpec = {
+                if (targetState) {
+                    (slideInHorizontally(MotionSpecs.expressiveSpring()) { it / 2 } + fadeIn(MotionSpecs.snappySpring())) togetherWith
+                        (slideOutHorizontally(MotionSpecs.expressiveSpring()) { -it / 3 } + fadeOut(MotionSpecs.snappySpring()))
+                } else {
+                    (slideInHorizontally(MotionSpecs.expressiveSpring()) { -it / 3 } + fadeIn(MotionSpecs.snappySpring())) togetherWith
+                        (slideOutHorizontally(MotionSpecs.expressiveSpring()) { it / 2 } + fadeOut(MotionSpecs.snappySpring()))
+                }
+            },
+            label = "DualPaneRightSlotSwap",
             modifier = Modifier
                 .weight(1.15f)
                 .fillMaxHeight()
                 .padding(top = 8.dp, bottom = 8.dp, end = 12.dp)
-                .glassmorphism(
-                    shape = OneUISquircleLarge,
-                    backgroundColor = Color(0x3517192D),
-                    borderWidth = 1.2.dp,
-                    elevation = 12.dp
+        ) { studioOpen ->
+            if (studioOpen) {
+                LyricsEditorDockedPane(
+                    track = currentTrack,
+                    initialTab = lastDockedEditorTab,
+                    tabRequestKey = dockedEditorRequestSeq,
+                    currentPositionMs = currentPositionMs,
+                    accentColor = currentTrack.accentColor,
+                    onDismiss = { dockedLyricsEditorTab = null },
+                    onImportLyricsUri = onImportLyricsUri,
+                    onSavePastedLyrics = onSavePastedLyrics,
+                    loadEditableLyrics = loadEditableLyrics,
+                    onClearLyrics = onClearLyrics,
+                    modifier = Modifier.fillMaxSize()
                 )
-        ) {
-            NowPlayingScreen(
-                track = currentTrack,
-                isPlaying = isPlaying,
-                currentPositionMs = currentPositionMs,
-                visualizerAmplitudes = visualizerAmplitudes,
-                isShuffleActive = isShuffleActive,
-                repeatMode = repeatMode,
-                volume = volume,
-                speed = speed,
-                sleepTimerMinutesLeft = sleepTimerMinutesLeft,
-                onCollapse = { /* In dual-pane mode, player stays persistent */ },
-                onTogglePlayPause = onTogglePlayPause,
-                onNext = onNext,
-                onPrevious = onPrevious,
-                onSeek = onSeek,
-                onToggleShuffle = onToggleShuffle,
-                onCycleRepeat = onCycleRepeat,
-                onToggleFavorite = { onToggleFavorite(currentTrack.id) },
-                onVolumeChange = onVolumeChange,
-                onSpeedChange = onSpeedChange,
-                onOpenEqualizer = onOpenEqualizer,
-                onOpenSleepTimer = onOpenSleepTimer,
-                progressBarDesign = progressBarDesign,
-                playerButtonSize = playerButtonSize,
-                visualizerAlbumArtSize = visualizerAlbumArtSize,
-                progressBarThickness = progressBarThickness,
-                visualizerStyle = visualizerStyle,
-                onVisualizerStyleChange = onVisualizerStyleChange,
-                elementColors = elementColors,
-                buttonAnimationEffect = buttonAnimationEffect,
-                lyricsAnimationStyle = lyricsAnimationStyle,
-                lyricsAnimationSpeed = lyricsAnimationSpeed,
-                lyricsGlowEnabled = lyricsGlowEnabled,
-                isCollapsible = false,
-                isLoadingLyrics = isLoadingLyrics,
-                onImportLyricsUri = onImportLyricsUri,
-                onSavePastedLyrics = onSavePastedLyrics,
-                loadEditableLyrics = loadEditableLyrics,
-                onRefetchLyrics = onRefetchLyrics,
-                onClearLyrics = onClearLyrics,
-                modifier = Modifier.fillMaxSize()
-            )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .glassmorphism(
+                            shape = OneUISquircleLarge,
+                            backgroundColor = Color(0x3517192D),
+                            borderWidth = 1.2.dp,
+                            elevation = 12.dp
+                        )
+                        .testTag("dual_pane_right_player_pane")
+                ) {
+                    NowPlayingScreen(
+                        track = currentTrack,
+                        isPlaying = isPlaying,
+                        currentPositionMs = currentPositionMs,
+                        visualizerAmplitudes = visualizerAmplitudes,
+                        isShuffleActive = isShuffleActive,
+                        repeatMode = repeatMode,
+                        volume = volume,
+                        speed = speed,
+                        sleepTimerMinutesLeft = sleepTimerMinutesLeft,
+                        onCollapse = { /* In dual-pane mode, player stays persistent */ },
+                        onTogglePlayPause = onTogglePlayPause,
+                        onNext = onNext,
+                        onPrevious = onPrevious,
+                        onSeek = onSeek,
+                        onToggleShuffle = onToggleShuffle,
+                        onCycleRepeat = onCycleRepeat,
+                        onToggleFavorite = { onToggleFavorite(currentTrack.id) },
+                        onVolumeChange = onVolumeChange,
+                        onSpeedChange = onSpeedChange,
+                        onOpenEqualizer = onOpenEqualizer,
+                        onOpenSleepTimer = onOpenSleepTimer,
+                        progressBarDesign = progressBarDesign,
+                        playerButtonSize = playerButtonSize,
+                        visualizerAlbumArtSize = visualizerAlbumArtSize,
+                        progressBarThickness = progressBarThickness,
+                        visualizerStyle = visualizerStyle,
+                        onVisualizerStyleChange = onVisualizerStyleChange,
+                        elementColors = elementColors,
+                        buttonAnimationEffect = buttonAnimationEffect,
+                        lyricsAnimationStyle = lyricsAnimationStyle,
+                        lyricsAnimationSpeed = lyricsAnimationSpeed,
+                        lyricsGlowEnabled = lyricsGlowEnabled,
+                        isCollapsible = false,
+                        isLoadingLyrics = isLoadingLyrics,
+                        displayMode = displayMode,
+                        onDisplayModeChange = onDisplayModeChange,
+                        enableAnimatedCovers = enableAnimatedCovers,
+                        autoFetchAnimatedCoversWifiOnly = autoFetchAnimatedCoversWifiOnly,
+                        simulateMotionOnStaticCovers = simulateMotionOnStaticCovers,
+                        onImportAnimatedCover = onImportAnimatedCover,
+                        onRemoveCustomAnimatedCover = onRemoveCustomAnimatedCover,
+                        onImportLyricsUri = onImportLyricsUri,
+                        onSavePastedLyrics = onSavePastedLyrics,
+                        loadEditableLyrics = loadEditableLyrics,
+                        onRefetchLyrics = onRefetchLyrics,
+                        onClearLyrics = onClearLyrics,
+                        onOpenExternalLyricsEditor = openDockedLyricsEditor,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
         }
     }
 }

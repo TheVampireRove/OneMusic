@@ -188,6 +188,9 @@ object AppSettingsCache {
                 put("lyricsAnimationStyle", settings.lyricsAnimationStyle.name)
                 put("lyricsAnimationSpeed", settings.lyricsAnimationSpeed.name)
                 put("lyricsGlowEnabled", settings.lyricsGlowEnabled)
+                put("enableAnimatedCovers", settings.enableAnimatedCovers)
+                put("autoFetchAnimatedCoversWifiOnly", settings.autoFetchAnimatedCoversWifiOnly)
+                put("simulateMotionOnStaticCovers", settings.simulateMotionOnStaticCovers)
             }
 
             val file = File(context.filesDir, SETTINGS_FILE_NAME)
@@ -413,7 +416,10 @@ object AppSettingsCache {
                 lyricsSyncWifiOnly = obj.optBoolean("lyricsSyncWifiOnly", false),
                 lyricsAnimationStyle = lyricsAnimationStyle,
                 lyricsAnimationSpeed = lyricsAnimationSpeed,
-                lyricsGlowEnabled = lyricsGlowEnabled
+                lyricsGlowEnabled = lyricsGlowEnabled,
+                enableAnimatedCovers = obj.optBoolean("enableAnimatedCovers", true),
+                autoFetchAnimatedCoversWifiOnly = obj.optBoolean("autoFetchAnimatedCoversWifiOnly", true),
+                simulateMotionOnStaticCovers = obj.optBoolean("simulateMotionOnStaticCovers", true)
             )
         } catch (_: Exception) {
             return AppSettings()

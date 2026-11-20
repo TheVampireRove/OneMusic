@@ -3,6 +3,8 @@ package com.example.audio
 import android.content.Context
 import android.media.audiofx.Equalizer
 import android.net.Uri
+import android.os.Looper
+import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -44,11 +46,51 @@ class AudioEngine(
 ) {
 
     private var _player: ExoPlayer? = null
+    private val releasedPlayers = java.util.Collections.newSetFromMap(java.util.WeakHashMap<ExoPlayer, Boolean>())
+
+    @Volatile
+    private var lastErrorOccurred: Boolean = false
 
     val exoPlayer: ExoPlayer?
-        get() = _player ?: synchronized(this) {
-            _player ?: createExoPlayer()?.also { _player = it }
+        get() {
+            val current = _player
+            if (isPlayerHealthy(current) && !lastErrorOccurred) return current
+            return synchronized(this) {
+                val locked = _player
+                if (isPlayerHealthy(locked) && !lastErrorOccurred) {
+                    locked
+                } else {
+                    if (locked != null) {
+                        releasedPlayers.add(locked)
+                        try { locked.release() } catch (_: Exception) {}
+                    }
+                    _player = null
+                    lastErrorOccurred = false
+                    createExoPlayer()?.also { _player = it }
+                }
+            }
         }
+
+    private fun isPlayerHealthy(player: ExoPlayer?): Boolean {
+        if (player == null || releasedPlayers.contains(player)) return false
+        return try {
+            player.playbackLooper.thread.isAlive && player.applicationLooper.thread.isAlive
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun markCurrentPlayerDeadForRecovery() {
+        synchronized(this) {
+            _player?.let { releasedPlayers.add(it) }
+            try { _player?.release() } catch (_: Exception) {}
+            _player = null
+            lastErrorOccurred = false
+            _isPlaying.value = false
+        }
+    }
+
+    fun isCurrentlyAlive(): Boolean = isPlayerHealthy(_player) && !lastErrorOccurred
 
     val visualizerManager = AudioVisualizerManager(scope, contextProvider)
     val visualizerAmplitudes: StateFlow<List<Float>> = visualizerManager.visualizerAmplitudes
@@ -61,6 +103,10 @@ class AudioEngine(
 
     private var currentTrack: Track? = null
     private var positionJob: Job? = null
+
+    @Volatile
+    private var seekGraceUntilMs: Long = 0L
+
     private var volumeMultiplier: Float = 0.85f
     private var playbackSpeed: Float = 1.0f
     private var shuffleEnabled: Boolean = false
@@ -136,8 +182,23 @@ class AudioEngine(
                         }
                     }
 
+                    override fun onPositionDiscontinuity(
+                        oldPosition: Player.PositionInfo,
+                        newPosition: Player.PositionInfo,
+                        reason: Int
+                    ) {
+                        if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                            reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                        ) {
+                            seekGraceUntilMs = 0L
+                            _currentPositionMs.value = newPosition.positionMs.coerceAtLeast(0L)
+                        }
+                    }
+
                     override fun onPlaybackStateChanged(state: Int) {
-                        if (state == Player.STATE_ENDED) {
+                        if (state == Player.STATE_READY) {
+                            seekGraceUntilMs = 0L
+                        } else if (state == Player.STATE_ENDED) {
                             _isPlaying.value = false
                             visualizerManager.onIsPlayingChanged(false)
                             scope.launch(Dispatchers.Main) {
@@ -147,8 +208,10 @@ class AudioEngine(
                     }
 
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        lastErrorOccurred = true
                         _isPlaying.value = false
                         visualizerManager.onIsPlayingChanged(false)
+                        positionJob?.cancel()
                     }
                 })
 
@@ -229,13 +292,42 @@ class AudioEngine(
         val player = exoPlayer ?: return
         val mediaItems = tracks.map { mediaItemFactory(it) }
 
-        player.setMediaItems(mediaItems, safeIndex, startFromMs)
+        val clampedStartMs = if (selectedTrack.durationMs > 300L) {
+            startFromMs.coerceIn(0L, selectedTrack.durationMs - 200L)
+        } else {
+            startFromMs.coerceAtLeast(0L)
+        }
+        seekGraceUntilMs = if (clampedStartMs > 0L) SystemClock.elapsedRealtime() + 450L else 0L
+        player.setMediaItems(mediaItems, safeIndex, clampedStartMs)
         player.shuffleModeEnabled = shuffleEnabled
         player.repeatMode = repeatMode.toPlayerRepeatMode()
         player.prepare()
         player.play()
-        _currentPositionMs.value = startFromMs
+        _currentPositionMs.value = clampedStartMs
         startPositionMonitoring()
+    }
+
+    /**
+     * Lightweight MediaItem for Android Auto browse tree & search results (does NOT synthesize WAVs on binder thread).
+     */
+    fun buildBrowseMediaItem(track: Track): MediaItem {
+        val metadataBuilder = MediaMetadata.Builder()
+            .setTitle(track.title)
+            .setArtist(track.artist)
+            .setAlbumTitle(track.album)
+            .setGenre(track.genre)
+            .setIsPlayable(true)
+            .setIsBrowsable(false)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+
+        if (track.albumArtUri != null) {
+            metadataBuilder.setArtworkUri(Uri.parse(track.albumArtUri))
+        }
+
+        return MediaItem.Builder()
+            .setMediaId(track.id)
+            .setMediaMetadata(metadataBuilder.build())
+            .build()
     }
 
     fun buildMediaItem(track: Track): MediaItem {
@@ -248,6 +340,7 @@ class AudioEngine(
             .setGenre(track.genre)
             .setIsPlayable(true)
             .setIsBrowsable(false)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
 
         if (track.albumArtUri != null) {
             metadataBuilder.setArtworkUri(Uri.parse(track.albumArtUri))
@@ -289,7 +382,11 @@ class AudioEngine(
 
     fun resume() {
         val player = exoPlayer ?: return
-        if (player.playbackState == Player.STATE_IDLE || player.currentMediaItem == null) {
+        if (player.playbackState == Player.STATE_IDLE ||
+            player.playbackState == Player.STATE_ENDED ||
+            player.currentMediaItem == null ||
+            player.mediaItemCount == 0
+        ) {
             currentTrack?.let { playTrack(it, startFromMs = _currentPositionMs.value) }
         } else {
             player.play()
@@ -298,15 +395,18 @@ class AudioEngine(
 
     fun pause() {
         _player?.let { p ->
-            _currentPositionMs.value = p.currentPosition.coerceAtLeast(0L)
-            p.pause()
+            if (isPlayerHealthy(p)) {
+                _currentPositionMs.value = p.currentPosition.coerceAtLeast(0L)
+                p.pause()
+            }
         }
         _isPlaying.value = false
         visualizerManager.onIsPlayingChanged(false)
     }
 
     fun togglePlayPause() {
-        if (_isPlaying.value) {
+        val actuallyPlaying = _isPlaying.value || (_player?.isPlaying == true)
+        if (actuallyPlaying) {
             pause()
         } else {
             resume()
@@ -314,13 +414,48 @@ class AudioEngine(
     }
 
     fun seekTo(positionMs: Long) {
-        val duration = currentTrack?.durationMs ?: 0L
-        val target = if (duration > 0) positionMs.coerceIn(0L, duration) else positionMs.coerceAtLeast(0L)
+        val trackDuration = currentTrack?.durationMs ?: 0L
+        val playerDuration = _player?.duration?.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+        val effectiveDuration = when {
+            playerDuration > 0L && trackDuration > 0L -> minOf(playerDuration, trackDuration)
+            playerDuration > 0L -> playerDuration
+            else -> trackDuration
+        }
+        val maxSeek = if (effectiveDuration > 300L) effectiveDuration - 200L else effectiveDuration
+        val target = if (maxSeek > 0L) positionMs.coerceIn(0L, maxSeek) else positionMs.coerceAtLeast(0L)
+
+        seekGraceUntilMs = SystemClock.elapsedRealtime() + 450L
         _currentPositionMs.value = target
-        scope.launch(Dispatchers.Main) {
+
+        val performSeek = {
             try {
-                exoPlayer?.seekTo(target)
+                val player = exoPlayer
+                if (player != null) {
+                    if (player.playbackState == Player.STATE_IDLE ||
+                        player.playbackState == Player.STATE_ENDED ||
+                        player.mediaItemCount == 0
+                    ) {
+                        currentTrack?.let { playTrack(it, startFromMs = target) }
+                    } else {
+                        val liveDuration = player.duration.takeIf { it != C.TIME_UNSET && it > 300L }
+                        val safeTarget = if (liveDuration != null) {
+                            target.coerceIn(0L, liveDuration - 200L)
+                        } else {
+                            target
+                        }
+                        _currentPositionMs.value = safeTarget
+                        player.seekTo(safeTarget)
+                    }
+                }
             } catch (_: Exception) {}
+        }
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            performSeek()
+        } else {
+            scope.launch(Dispatchers.Main) {
+                performSeek()
+            }
         }
     }
 
@@ -374,63 +509,38 @@ class AudioEngine(
             return Uri.parse(track.uriString)
         }
 
-        // Cache or generate synthesized PCM WAV file for bundled songs
-        val file = File(context.cacheDir, "synth_${track.id}.wav")
-        if (!file.exists() || file.length() < 1000L) {
-            generateWavForTrack(file, track)
+        // Remove legacy 30-second synthesized cache file if present
+        val legacyFile = File(context.cacheDir, "synth_${track.id}.wav")
+        if (legacyFile.exists()) {
+            try { legacyFile.delete() } catch (_: Exception) {}
+        }
+
+        // Cache or generate full-duration synthesized PCM WAV file for bundled songs
+        val expectedDurationSec = if (track.durationMs > 0L) {
+            ((track.durationMs + 999L) / 1000L).coerceIn(30L, 600L)
+        } else {
+            30L
+        }
+        val sampleRate = 11025L
+        val minExpectedBytes = 44L + (sampleRate * expectedDurationSec * 2L) - 1024L
+        val file = File(context.cacheDir, "synth_v2_${track.id}_${expectedDurationSec}.wav")
+        if (!file.exists() || file.length() < minExpectedBytes) {
+            generateWavForTrack(file, track, expectedDurationSec.toInt())
         }
         return Uri.fromFile(file)
     }
 
-    private fun generateWavForTrack(file: File, track: Track) {
+    private fun generateWavForTrack(file: File, track: Track, durationSeconds: Int) {
         try {
-            val sampleRate = 44100
-            val durationSeconds = 30
+            val sampleRate = 11025
             val totalFrames = sampleRate * durationSeconds
+            val channels = 1
             val rootHz = track.rootPitchHz
             val bpm = track.bpm.toFloat()
 
-            val pcmData = ShortArray(totalFrames * 2)
-            for (i in 0 until totalFrames) {
-                val t = i.toDouble() / sampleRate
-                val beatIndex = ((t * (bpm / 60.0))).toLong()
-                val chordStep = (beatIndex / 4) % 4
-                val chordRatio = when (chordStep) {
-                    0L -> 1.0
-                    1L -> 1.2599
-                    2L -> 1.4983
-                    else -> 1.3348
-                }
-                val chordFreq = rootHz * chordRatio
-                val bassFreq = (rootHz * 0.5) * if (chordStep % 2L == 0L) 1.0 else 1.3348
-
-                val beatPhase = (t * (bpm / 60.0)) % 1.0
-                val kickEnvelope = (1.0 - beatPhase).coerceIn(0.0, 1.0)
-                val kickEnvPow = kickEnvelope * kickEnvelope * kickEnvelope
-
-                val s1 = sin(2.0 * PI * chordFreq * t)
-                val s2 = sin(2.0 * PI * (chordFreq * 1.5) * t) * 0.5
-                val s3 = sin(2.0 * PI * (chordFreq * 2.0) * t) * 0.35
-                val pad = (s1 + s2 + s3) * 0.28
-
-                val bass = (sin(2.0 * PI * bassFreq * t) + sin(2.0 * PI * (bassFreq * 0.5) * t) * 0.6) *
-                    (0.35 + 0.4 * kickEnvPow)
-
-                val arpStep = ((t * (bpm / 60.0) * 4).toLong() % 6)
-                val arpMult = 1.0 + (arpStep * 0.25)
-                val melody = sin(2.0 * PI * (chordFreq * 2.0 * arpMult) * t) * 0.15
-
-                val left = (pad + bass + melody * 1.1) * 20000.0
-                val right = (pad + bass + melody * 0.9) * 20000.0
-
-                pcmData[i * 2] = left.toInt().coerceIn(-32767, 32767).toShort()
-                pcmData[i * 2 + 1] = right.toInt().coerceIn(-32767, 32767).toShort()
-            }
-
             FileOutputStream(file).use { out ->
-                val totalAudioLen = (totalFrames * 4).toLong()
-                val totalDataLen = totalAudioLen + 36
-                val channels = 2
+                val totalAudioLen = (totalFrames.toLong() * channels * 2L)
+                val totalDataLen = totalAudioLen + 36L
                 val byteRate = 16 * sampleRate * channels / 8
 
                 val header = ByteArray(44)
@@ -461,11 +571,49 @@ class AudioEngine(
                 header[43] = ((totalAudioLen shr 24) and 0xff).toByte()
 
                 out.write(header)
-                val byteBuffer = ByteBuffer.allocate(pcmData.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-                for (sample in pcmData) {
-                    byteBuffer.putShort(sample)
+
+                val chunkFrames = 4096
+                val byteBuffer = ByteBuffer.allocate(chunkFrames * 2).order(ByteOrder.LITTLE_ENDIAN)
+                var frame = 0
+                while (frame < totalFrames) {
+                    val count = minOf(chunkFrames, totalFrames - frame)
+                    byteBuffer.clear()
+                    for (j in 0 until count) {
+                        val i = frame + j
+                        val t = i.toDouble() / sampleRate
+                        val beatIndex = ((t * (bpm / 60.0))).toLong()
+                        val chordStep = (beatIndex / 4) % 4
+                        val chordRatio = when (chordStep) {
+                            0L -> 1.0
+                            1L -> 1.2599
+                            2L -> 1.4983
+                            else -> 1.3348
+                        }
+                        val chordFreq = rootHz * chordRatio
+                        val bassFreq = (rootHz * 0.5) * if (chordStep % 2L == 0L) 1.0 else 1.3348
+
+                        val beatPhase = (t * (bpm / 60.0)) % 1.0
+                        val kickEnvelope = (1.0 - beatPhase).coerceIn(0.0, 1.0)
+                        val kickEnvPow = kickEnvelope * kickEnvelope * kickEnvelope
+
+                        val s1 = sin(2.0 * PI * chordFreq * t)
+                        val s2 = sin(2.0 * PI * (chordFreq * 1.5) * t) * 0.5
+                        val s3 = sin(2.0 * PI * (chordFreq * 2.0) * t) * 0.35
+                        val pad = (s1 + s2 + s3) * 0.28
+
+                        val bass = (sin(2.0 * PI * bassFreq * t) + sin(2.0 * PI * (bassFreq * 0.5) * t) * 0.6) *
+                            (0.35 + 0.4 * kickEnvPow)
+
+                        val arpStep = ((t * (bpm / 60.0) * 4).toLong() % 6)
+                        val arpMult = 1.0 + (arpStep * 0.25)
+                        val melody = sin(2.0 * PI * (chordFreq * 2.0 * arpMult) * t) * 0.15
+
+                        val mono = (pad + bass + melody) * 20000.0
+                        byteBuffer.putShort(mono.toInt().coerceIn(-32767, 32767).toShort())
+                    }
+                    out.write(byteBuffer.array(), 0, count * 2)
+                    frame += count
                 }
-                out.write(byteBuffer.array())
             }
         } catch (_: Exception) {}
     }
@@ -476,8 +624,10 @@ class AudioEngine(
         positionJob = scope.launch(Dispatchers.Main) {
             while (isActive && _isPlaying.value) {
                 val player = _player
-                val currentPosition = player?.currentPosition ?: 0L
-                _currentPositionMs.value = currentPosition
+                if (player != null && SystemClock.elapsedRealtime() >= seekGraceUntilMs) {
+                    val currentPosition = player.currentPosition.coerceAtLeast(0L)
+                    _currentPositionMs.value = currentPosition
+                }
                 delay(50L)
             }
         }

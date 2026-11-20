@@ -224,46 +224,243 @@ class MusicRepository {
         }
     }
 
+    data class AddTracksResult(
+        val addedTracks: List<Track>,
+        val skippedDuplicates: Int,
+        val remappedIds: Map<String, String>
+    )
+
+    data class DeduplicateResult(
+        val removedIds: Set<String>,
+        val remappedIds: Map<String, String>
+    )
+
     fun addTracks(newTracks: List<Track>) {
-        if (newTracks.isEmpty()) return
-        val incomingById = newTracks.associateBy { it.id }
-        val existingIds = _tracks.value.map { it.id }.toSet()
-        val updatedExisting = _tracks.value.map { existing ->
-            val incoming = incomingById[existing.id]
-            if (incoming != null) {
-                val resolvedTrackNumber = if (existing.trackNumber > 0) existing.trackNumber else incoming.trackNumber
-                val resolvedDiscNumber = if (existing.discNumber > 0) existing.discNumber else incoming.discNumber
-                val resolvedArtKey = existing.albumArtKey ?: incoming.albumArtKey
-                val resolvedArtUri = existing.albumArtUri ?: incoming.albumArtUri
-                val resolvedHasArt = existing.hasEmbeddedArt || incoming.hasEmbeddedArt
-                val resolvedLyrics = existing.lyrics.ifEmpty { incoming.lyrics }
-                if (resolvedTrackNumber != existing.trackNumber ||
-                    resolvedDiscNumber != existing.discNumber ||
-                    resolvedArtKey != existing.albumArtKey ||
-                    resolvedArtUri != existing.albumArtUri ||
-                    resolvedHasArt != existing.hasEmbeddedArt ||
-                    resolvedLyrics != existing.lyrics
-                ) {
-                    existing.copy(
-                        trackNumber = resolvedTrackNumber,
-                        discNumber = resolvedDiscNumber,
-                        albumArtKey = resolvedArtKey,
-                        albumArtUri = resolvedArtUri,
-                        hasEmbeddedArt = resolvedHasArt,
-                        lyrics = resolvedLyrics
-                    )
-                } else {
-                    existing
-                }
+        addTracksWithReport(newTracks)
+    }
+
+    fun addTracksWithReport(newTracks: List<Track>): AddTracksResult {
+        if (newTracks.isEmpty()) return AddTracksResult(emptyList(), 0, emptyMap())
+
+        // Deduplicate incoming batch against itself first
+        val distinctIncoming = mutableListOf<Track>()
+        for (candidate in newTracks) {
+            val existingIdx = distinctIncoming.indexOfFirst { it.id == candidate.id || areCrossSourceDuplicate(it, candidate) }
+            if (existingIdx >= 0) {
+                val prev = distinctIncoming[existingIdx]
+                val winner = choosePreferredTrack(prev, candidate)
+                val loser = if (winner === prev) candidate else prev
+                distinctIncoming[existingIdx] = mergeTrackFields(winner, loser)
             } else {
-                existing
+                distinctIncoming.add(candidate)
             }
         }
-        val uniqueNew = newTracks.filter { !existingIds.contains(it.id) }
-        if (uniqueNew.isNotEmpty() || updatedExisting != _tracks.value) {
-            _tracks.value = uniqueNew + updatedExisting
+
+        val currentList = _tracks.value.toMutableList()
+        val addedTracks = mutableListOf<Track>()
+        var skippedDuplicates = newTracks.size - distinctIncoming.size
+        val remappedIds = mutableMapOf<String, String>()
+        var changed = false
+
+        for (incoming in distinctIncoming) {
+            val matchIndex = currentList.indexOfFirst { existing ->
+                existing.id == incoming.id || areCrossSourceDuplicate(existing, incoming)
+            }
+            if (matchIndex >= 0) {
+                val existing = currentList[matchIndex]
+                val shouldUpgradeIdToCanonical =
+                    existing.id != incoming.id &&
+                        existing.id.startsWith("local_") &&
+                        incoming.id.startsWith("device_media_")
+
+                val merged = if (shouldUpgradeIdToCanonical) {
+                    remappedIds[existing.id] = incoming.id
+                    mergeTrackFields(incoming, existing)
+                } else {
+                    if (existing.id != incoming.id) {
+                        remappedIds[incoming.id] = existing.id
+                    }
+                    mergeTrackFields(existing, incoming)
+                }
+
+                if (merged != existing) {
+                    currentList[matchIndex] = merged
+                    changed = true
+                }
+                if (existing.id != incoming.id || existing.isLocalFile) {
+                    skippedDuplicates++
+                }
+            } else {
+                addedTracks.add(incoming)
+            }
+        }
+
+        if (addedTracks.isNotEmpty() || changed) {
+            _tracks.value = addedTracks + currentList
+        }
+        return AddTracksResult(
+            addedTracks = addedTracks,
+            skippedDuplicates = skippedDuplicates,
+            remappedIds = remappedIds
+        )
+    }
+
+    fun findDuplicateLocalTracks(): List<Track> {
+        val current = _tracks.value
+        val keepers = mutableListOf<Track>()
+        val duplicates = mutableListOf<Track>()
+        for (track in current) {
+            if (!track.isLocalFile) continue
+            val dupOf = keepers.firstOrNull { keeper ->
+                keeper.id == track.id || areManualDuplicateCandidate(keeper, track)
+            }
+            if (dupOf != null) {
+                duplicates.add(track)
+            } else {
+                keepers.add(track)
+            }
+        }
+        return duplicates
+    }
+
+    fun removeDuplicateTracks(): DeduplicateResult {
+        val current = _tracks.value
+        if (current.isEmpty()) return DeduplicateResult(emptySet(), emptyMap())
+
+        val resultList = mutableListOf<Track>()
+        val removedIds = mutableSetOf<String>()
+        val remappedIds = mutableMapOf<String, String>()
+
+        for (track in current) {
+            if (!track.isLocalFile) {
+                resultList.add(track)
+                continue
+            }
+            val matchIdx = resultList.indexOfFirst { existing ->
+                existing.isLocalFile && (existing.id == track.id || areManualDuplicateCandidate(existing, track))
+            }
+            if (matchIdx >= 0) {
+                val existing = resultList[matchIdx]
+                val winner = choosePreferredTrack(existing, track)
+                val loser = if (winner.id == existing.id) track else existing
+                val mergedWinner = mergeTrackFields(winner, loser)
+                resultList[matchIdx] = mergedWinner
+                removedIds.add(loser.id)
+                if (loser.id != mergedWinner.id) {
+                    remappedIds[loser.id] = mergedWinner.id
+                }
+            } else {
+                resultList.add(track)
+            }
+        }
+
+        if (removedIds.isNotEmpty()) {
+            _tracks.value = resultList
+        }
+        return DeduplicateResult(removedIds = removedIds, remappedIds = remappedIds)
+    }
+
+    private fun mergeTrackFields(primary: Track, secondary: Track): Track {
+        val resolvedTrackNumber = if (primary.trackNumber > 0) primary.trackNumber else secondary.trackNumber
+        val resolvedDiscNumber = if (primary.discNumber > 0) primary.discNumber else secondary.discNumber
+        val resolvedArtKey = primary.albumArtKey ?: secondary.albumArtKey
+        val resolvedArtUri = primary.albumArtUri ?: secondary.albumArtUri
+        val resolvedHasArt = primary.hasEmbeddedArt || secondary.hasEmbeddedArt
+        val resolvedLyrics = primary.lyrics.ifEmpty { secondary.lyrics }
+        val resolvedFavorite = primary.isFavorite || secondary.isFavorite
+        val resolvedArtist = if (!isPlaceholderArtist(primary.artist)) primary.artist else secondary.artist
+        val resolvedAlbum = if (!isPlaceholderAlbum(primary.album)) primary.album else secondary.album
+
+        return if (resolvedTrackNumber != primary.trackNumber ||
+            resolvedDiscNumber != primary.discNumber ||
+            resolvedArtKey != primary.albumArtKey ||
+            resolvedArtUri != primary.albumArtUri ||
+            resolvedHasArt != primary.hasEmbeddedArt ||
+            resolvedLyrics != primary.lyrics ||
+            resolvedFavorite != primary.isFavorite ||
+            resolvedArtist != primary.artist ||
+            resolvedAlbum != primary.album
+        ) {
+            primary.copy(
+                artist = resolvedArtist,
+                album = resolvedAlbum,
+                trackNumber = resolvedTrackNumber,
+                discNumber = resolvedDiscNumber,
+                albumArtKey = resolvedArtKey,
+                albumArtUri = resolvedArtUri,
+                hasEmbeddedArt = resolvedHasArt,
+                lyrics = resolvedLyrics,
+                isFavorite = resolvedFavorite
+            )
+        } else {
+            primary
         }
     }
+
+    private fun choosePreferredTrack(a: Track, b: Track): Track {
+        fun score(t: Track): Int {
+            var s = 0
+            if (t.id.startsWith("device_media_")) s += 100
+            if (t.hasEmbeddedArt) s += 20
+            if (t.isFavorite) s += 10
+            if (t.lyrics.isNotEmpty()) s += 5
+            if (t.trackNumber > 0) s += 3
+            if (!isPlaceholderArtist(t.artist)) s += 2
+            if (!isPlaceholderAlbum(t.album)) s += 2
+            return s
+        }
+        return if (score(a) >= score(b)) a else b
+    }
+
+    private fun areCrossSourceDuplicate(a: Track, b: Track): Boolean {
+        if (!a.isLocalFile || !b.isLocalFile) return false
+        if (!a.uriString.isNullOrBlank() && a.uriString == b.uriString) return true
+        // Never collapse two distinct MediaStore IDs unless their URI matches
+        if (a.id.startsWith("device_media_") && b.id.startsWith("device_media_")) return false
+        return matchesMetadataFingerprint(a, b)
+    }
+
+    private fun areManualDuplicateCandidate(a: Track, b: Track): Boolean {
+        if (!a.isLocalFile || !b.isLocalFile) return false
+        if (!a.uriString.isNullOrBlank() && a.uriString == b.uriString) return true
+        if (a.id.startsWith("device_media_") && b.id.startsWith("device_media_")) return false
+        return matchesMetadataFingerprint(a, b)
+    }
+
+    private fun matchesMetadataFingerprint(a: Track, b: Track): Boolean {
+        val titleA = normalizeTag(a.title)
+        val titleB = normalizeTag(b.title)
+        if (titleA.isBlank() || titleA != titleB) return false
+        if (titleA in setOf("local track", "unknown track", "track", "untitled")) return false
+
+        val durationDiff = kotlin.math.abs(a.durationMs - b.durationMs)
+        if (durationDiff > 2500L) return false
+
+        val artistGenericA = isPlaceholderArtist(a.artist)
+        val artistGenericB = isPlaceholderArtist(b.artist)
+        val artistMatches = when {
+            artistGenericA || artistGenericB -> true
+            else -> normalizeTag(a.artist) == normalizeTag(b.artist)
+        }
+        if (!artistMatches) return false
+
+        val albumGenericA = isPlaceholderAlbum(a.album)
+        val albumGenericB = isPlaceholderAlbum(b.album)
+        return if (!albumGenericA && !albumGenericB) {
+            normalizeTag(a.album) == normalizeTag(b.album)
+        } else {
+            !artistGenericA && !artistGenericB
+        }
+    }
+
+    private fun normalizeTag(value: String): String =
+        value.trim().lowercase().replace(Regex("\\s+"), " ")
+
+    private fun isPlaceholderArtist(artist: String): Boolean =
+        normalizeTag(artist) in setOf("", "unknown", "<unknown>", "unknown artist", "local artist")
+
+    private fun isPlaceholderAlbum(album: String): Boolean =
+        normalizeTag(album) in setOf("", "unknown", "<unknown>", "unknown album", "device storage", "device music", "device audio")
 
     fun applyTrackNumberUpdates(updates: Map<String, Pair<Int, Int>>): Boolean {
         if (updates.isEmpty()) return false
@@ -290,10 +487,23 @@ class MusicRepository {
         return changed
     }
 
-    @androidx.annotation.VisibleForTesting
-    internal fun removeTracksByIds(ids: Set<String>) {
-        if (ids.isEmpty()) return
-        _tracks.value = _tracks.value.filterNot { it.id in ids }
+    fun removeTracksByIds(ids: Set<String>): List<Track> {
+        if (ids.isEmpty()) return emptyList()
+        val removed = _tracks.value.filter { it.id in ids }
+        if (removed.isNotEmpty()) {
+            _tracks.value = _tracks.value.filterNot { it.id in ids }
+        }
+        return removed
+    }
+
+    fun restoreTracks(tracksToRestore: List<Track>) {
+        if (tracksToRestore.isEmpty()) return
+        addTracksWithReport(tracksToRestore)
+    }
+
+    internal fun seedLegacyTracksRaw(legacyTracks: List<Track>) {
+        if (legacyTracks.isEmpty()) return
+        _tracks.value = legacyTracks + _tracks.value
     }
 
     private var appContext: android.content.Context? = null

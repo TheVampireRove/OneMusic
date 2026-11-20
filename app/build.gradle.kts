@@ -10,14 +10,14 @@ plugins {
 
 android {
   namespace = "com.example"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
+  compileSdk = 37
 
   defaultConfig {
     applicationId = "com.aistudio.onemusic.kxmpzq"
     minSdk = 24
-    targetSdk = 36
-    versionCode = 38
-    versionName = "38.0"
+    targetSdk = 37
+    versionCode = 46
+    versionName = "46.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     multiDexEnabled = true
@@ -104,6 +104,7 @@ dependencies {
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.session)
   implementation(libs.androidx.media3.common)
+  implementation(libs.androidx.media3.ui)
   implementation(libs.androidx.window)
   implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
@@ -114,6 +115,7 @@ dependencies {
   // implementation(libs.androidx.room.ktx)
   // implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
+  implementation(libs.coil.gif)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

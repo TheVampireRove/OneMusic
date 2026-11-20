@@ -1,8 +1,9 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,7 +20,6 @@ import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,10 +35,14 @@ import androidx.compose.ui.unit.dp
 import com.example.model.AlbumArtSize
 import com.example.model.ElementColors
 import com.example.model.Track
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUISquircleMedium
+import com.example.ui.theme.bouncableClick
+import com.example.ui.theme.bouncableCombinedClick
 import com.example.ui.theme.glassmorphism
 import com.example.ui.theme.parseHexColor
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TrackListItem(
     track: Track,
@@ -49,6 +53,7 @@ fun TrackListItem(
     albumArtSize: AlbumArtSize = AlbumArtSize.MEDIUM,
     elementColors: ElementColors? = null,
     showTrackNumber: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val activeCardHex = elementColors?.trackActiveHighlight?.let { parseHexColor(it) }?.copy(alpha = 0.28f) ?: Color(0x357C4DFF)
@@ -56,19 +61,33 @@ fun TrackListItem(
 
     val bgColor by animateColorAsState(
         targetValue = if (isCurrentTrack) activeCardHex else normalCardHex,
+        animationSpec = MotionSpecs.snappySpring(),
         label = "track_bg"
     )
+
+    val clickModifier = if (onLongClick != null) {
+        Modifier.bouncableCombinedClick(
+            pressedScale = 0.965f,
+            onClick = onTrackClick,
+            onLongClick = onLongClick
+        )
+    } else {
+        Modifier.bouncableClick(
+            pressedScale = 0.965f,
+            onClick = onTrackClick
+        )
+    }
 
     Box(
         modifier = modifier
             .fillMaxWidth()
+            .then(clickModifier)
             .glassmorphism(
                 shape = OneUISquircleMedium,
                 backgroundColor = bgColor,
                 borderWidth = if (isCurrentTrack) 1.2.dp else 0.8.dp,
                 elevation = if (isCurrentTrack) 6.dp else 2.dp
             )
-            .clickable(onClick = onTrackClick)
             .testTag("track_item_${track.id}")
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
@@ -132,7 +151,16 @@ fun TrackListItem(
                         ),
                         color = if (isCurrentTrack) activeTitleColor else normalTitleColor,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .then(
+                                if (isCurrentTrack) {
+                                    Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                                } else {
+                                    Modifier
+                                }
+                            )
                     )
                 }
 
@@ -154,7 +182,7 @@ fun TrackListItem(
                 modifier = Modifier.padding(horizontal = 6.dp)
             )
 
-            // Favorite button
+            // Favorite button with smooth icon morph
             val favoriteColor = elementColors?.trackFavoriteColor?.let { parseHexColor(it) } ?: Color(0xFFFF4081)
             val unselectedFavColor = elementColors?.trackSubtitleColor?.let { parseHexColor(it) }?.copy(alpha = 0.6f) ?: Color(0x77FFFFFF)
             OneUITooltipButton(
@@ -163,17 +191,23 @@ fun TrackListItem(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(40.dp)
                         .clip(CircleShape)
                         .testTag("track_fav_${track.id}"),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (track.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = "Favorite",
-                        tint = if (track.isFavorite) favoriteColor else unselectedFavColor,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    AnimatedContent(
+                        targetState = track.isFavorite,
+                        transitionSpec = { MotionSpecs.iconMorphTransition() },
+                        label = "track_fav_morph"
+                    ) { fav ->
+                        Icon(
+                            imageVector = if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = "Favorite",
+                            tint = if (fav) favoriteColor else unselectedFavColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }

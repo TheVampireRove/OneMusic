@@ -30,7 +30,7 @@ fun FoldableAutoFlexTracker(
     // Tabletop mode is strictly valid in LANDSCAPE on the INNER/EXPANDED display.
     // Deactivates on cover screen and in portrait orientation when half opened.
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val isInnerDisplay = configuration.smallestScreenWidthDp >= 580 || configuration.screenWidthDp >= 600
+    val isInnerDisplay = configuration.smallestScreenWidthDp >= 580
 
     LaunchedEffect(isLandscape, isInnerDisplay) {
         val displayState = if (isInnerDisplay) "Inner Screen" else "Cover Screen"

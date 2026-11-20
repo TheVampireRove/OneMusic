@@ -10,8 +10,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -63,12 +64,14 @@ fun ExpressiveScrubber(
     thumbColor: Color = Color.White
 ) {
     var isDragging by remember { mutableStateOf(false) }
-    var dragFraction by remember { mutableFloatStateOf(progress) }
+    var dragFraction by remember { mutableFloatStateOf(progress.coerceIn(0f, 1f)) }
+    val currentOnProgressChange by rememberUpdatedState(onProgressChange)
+    val currentOnProgressChangeFinished by rememberUpdatedState(onProgressChangeFinished)
 
-    // Smooth gliding progress updates
+    // Smooth gliding progress updates during playback (snaps immediately when dragging)
     val animatedProgress by animateFloatAsState(
         targetValue = progress.coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = 350, easing = LinearEasing),
+        animationSpec = tween(durationMillis = if (isDragging) 0 else 250, easing = LinearEasing),
         label = "scrubber_progress"
     )
     val effectiveProgress = if (isDragging) dragFraction else animatedProgress
@@ -111,38 +114,39 @@ fun ExpressiveScrubber(
             .height(44.dp)
             .testTag("expressive_scrubber")
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = { offset ->
-                        val fraction = (offset.x / size.width).coerceIn(0f, 1f)
-                        dragFraction = fraction
-                        onProgressChange(fraction)
-                        onProgressChangeFinished()
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                    isDragging = true
+                    var latestFraction = (down.position.x / widthPx).coerceIn(0f, 1f)
+                    dragFraction = latestFraction
+                    currentOnProgressChange(latestFraction)
+                    down.consume()
+
+                    var activePointerId = down.id
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == activePointerId }
+                            ?: event.changes.firstOrNull()
+                            ?: break
+                        activePointerId = change.id
+                        if (!change.pressed) {
+                            latestFraction = (change.position.x / widthPx).coerceIn(0f, 1f)
+                            dragFraction = latestFraction
+                            currentOnProgressChange(latestFraction)
+                            change.consume()
+                            break
+                        }
+                        if (change.position != change.previousPosition) {
+                            latestFraction = (change.position.x / widthPx).coerceIn(0f, 1f)
+                            dragFraction = latestFraction
+                            currentOnProgressChange(latestFraction)
+                            change.consume()
+                        }
                     }
-                )
-            }
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        isDragging = true
-                        val fraction = (offset.x / size.width).coerceIn(0f, 1f)
-                        dragFraction = fraction
-                        onProgressChange(fraction)
-                    },
-                    onDragEnd = {
-                        isDragging = false
-                        onProgressChangeFinished()
-                    },
-                    onDragCancel = {
-                        isDragging = false
-                        onProgressChangeFinished()
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        val fraction = (change.position.x / size.width).coerceIn(0f, 1f)
-                        dragFraction = fraction
-                        onProgressChange(fraction)
-                    }
-                )
+                    isDragging = false
+                    currentOnProgressChangeFinished()
+                }
             }
     ) {
         Canvas(modifier = Modifier.matchParentSize()) {

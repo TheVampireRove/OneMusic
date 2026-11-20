@@ -39,7 +39,9 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
+import com.example.ui.theme.bouncableCombinedClick
 import com.example.ui.theme.glassmorphism
 import kotlinx.coroutines.launch
 
@@ -57,6 +59,8 @@ fun OneUITooltipButton(
     consumeClicks: Boolean = true,
     enabled: Boolean = true,
     interactionSource: MutableInteractionSource? = null,
+    enableBounce: Boolean = interactionSource == null,
+    pressedScale: Float = 0.94f,
     content: @Composable () -> Unit
 ) {
     val tooltipState = rememberTooltipState()
@@ -99,22 +103,35 @@ fun OneUITooltipButton(
         modifier = modifier
     ) {
         if (consumeClicks) {
+            val triggerLongPress: () -> Unit = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                scope.launch {
+                    tooltipState.show()
+                }
+            }
+            val clickModifier = if (enableBounce) {
+                Modifier.bouncableCombinedClick(
+                    enabled = enabled,
+                    pressedScale = pressedScale,
+                    interactionSource = interactionSource,
+                    useDefaultIndication = false,
+                    onClick = onClick,
+                    onLongClick = triggerLongPress
+                )
+            } else {
+                Modifier.oneUILongPress(
+                    name = name,
+                    onClick = onClick,
+                    enabled = enabled,
+                    interactionSource = interactionSource,
+                    onLongClick = triggerLongPress
+                )
+            }
             Box(
                 modifier = Modifier
                     .then(if (shape != null) Modifier.clip(shape) else Modifier)
                     .background(Color.Transparent)
-                    .oneUILongPress(
-                        name = name,
-                        onClick = onClick,
-                        enabled = enabled,
-                        interactionSource = interactionSource,
-                        onLongClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            scope.launch {
-                                tooltipState.show()
-                            }
-                        }
-                    )
+                    .then(clickModifier)
             ) {
                 content()
             }
@@ -152,8 +169,14 @@ fun OneUITooltipBanner(
 ) {
     AnimatedVisibility(
         visible = text != null,
-        enter = fadeIn() + scaleIn(initialScale = 0.85f),
-        exit = fadeOut() + scaleOut(targetScale = 0.85f),
+        enter = fadeIn(animationSpec = MotionSpecs.snappySpring()) + scaleIn(
+            initialScale = 0.85f,
+            animationSpec = MotionSpecs.snappySpring()
+        ),
+        exit = fadeOut(animationSpec = MotionSpecs.snappySpring()) + scaleOut(
+            targetScale = 0.85f,
+            animationSpec = MotionSpecs.snappySpring()
+        ),
         modifier = modifier
     ) {
         if (text != null) {

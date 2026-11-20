@@ -36,6 +36,10 @@ class AudioPlaybackManager private constructor() {
         return audioEngine.buildMediaItem(track)
     }
 
+    fun trackToBrowseMediaItem(track: Track): androidx.media3.common.MediaItem {
+        return audioEngine.buildBrowseMediaItem(track)
+    }
+
     val isPlaying: StateFlow<Boolean> = audioEngine.isPlaying
     val currentPositionMs: StateFlow<Long> = audioEngine.currentPositionMs
     val visualizerAmplitudes: StateFlow<List<Float>> = audioEngine.visualizerAmplitudes
@@ -218,18 +222,73 @@ class AudioPlaybackManager private constructor() {
         audioEngine.refreshVisualizerPermission()
     }
 
+    /**
+     * Called when MainActivity or OneMusicAutoService returns from background/inactivity
+     * to verify ExoPlayer is alive, recover if released, and refresh audio focus/visualizer state.
+     */
+    fun ensureActivePlayer() {
+        val ctx = appContext ?: return
+        repository.initContext(ctx)
+        val player = audioEngine.exoPlayer ?: return
+        if (player.mediaItemCount == 0) {
+            val current = _currentTrack.value
+            val pos = currentPositionMs.value
+            audioEngine.restoreTrackState(current, pos)
+        } else {
+            val actualPlaying = player.isPlaying
+            if (!actualPlaying && isPlaying.value) {
+                audioEngine.pause()
+            }
+        }
+        audioEngine.refreshVisualizerPermission()
+    }
+
+    fun syncQueueFromExternalMediaItems(
+        items: List<androidx.media3.common.MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long
+    ) {
+        if (items.isEmpty()) return
+        val allTracks = repository.tracks.value
+        val byId = allTracks.associateBy { it.id }
+        val resolvedTracks = items.mapNotNull { byId[it.mediaId] }
+        if (resolvedTracks.isNotEmpty()) {
+            val safeIdx = startIndex.coerceIn(0, resolvedTracks.lastIndex)
+            val selected = resolvedTracks[safeIdx]
+            hasUserInitiatedPlayback = true
+            hasRestoredSavedTrack = true
+            _playbackQueue.value = resolvedTracks
+            _currentTrack.value = selected
+            audioEngine.updateCurrentTrackMetadata(selected)
+            repository.updateSettings {
+                it.copy(
+                    lastPlayedTrackId = selected.id,
+                    lastPlayedPositionMs = startPositionMs.coerceAtLeast(0L),
+                    lastPlayedQueueIds = resolvedTracks.map { t -> t.id }
+                )
+            }
+        }
+    }
+
     fun startPlaybackService() {
         val ctx = appContext ?: return
+        val intent = Intent(ctx, com.example.service.OneMusicAutoService::class.java).apply {
+            action = com.example.service.OneMusicAutoService.ACTION_SYNC
+        }
         try {
-            val intent = Intent(ctx, com.example.service.OneMusicAutoService::class.java).apply {
-                action = com.example.service.OneMusicAutoService.ACTION_SYNC
-            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ctx.startForegroundService(intent)
             } else {
                 ctx.startService(intent)
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            // On Android 12+/17+, calling startService from background also throws IllegalStateException/ForegroundServiceStartNotAllowedException
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                try {
+                    ctx.startService(intent)
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     /**
@@ -310,9 +369,54 @@ class AudioPlaybackManager private constructor() {
         }
     }
 
+    fun removeOrRemapTracks(
+        removedIds: Set<String>,
+        remappedIds: Map<String, String> = emptyMap()
+    ) {
+        if (removedIds.isEmpty() && remappedIds.isEmpty()) return
+        val repoTracks = repository.tracks.value
+        val repoMap = repoTracks.associateBy { it.id }
+
+        val updatedQueue = _playbackQueue.value
+            .mapNotNull { queued ->
+                val canonicalId = remappedIds[queued.id]
+                when {
+                    canonicalId != null -> repoMap[canonicalId] ?: queued.copy(id = canonicalId)
+                    queued.id in removedIds -> null
+                    else -> repoMap[queued.id] ?: queued
+                }
+            }
+            .distinctBy { it.id }
+            .ifEmpty { repoTracks }
+
+        _playbackQueue.value = updatedQueue
+
+        val currentId = _currentTrack.value.id
+        val remappedCurrent = remappedIds[currentId]?.let { repoMap[it] }
+        if (remappedCurrent != null) {
+            _currentTrack.value = remappedCurrent
+            audioEngine.updateCurrentTrackMetadata(remappedCurrent)
+        } else if (currentId in removedIds) {
+            if (isPlaying.value || audioEngine.isPlaying.value) {
+                audioEngine.pause()
+            }
+            val fallback = updatedQueue.firstOrNull() ?: repoTracks.firstOrNull()
+            if (fallback != null) {
+                _currentTrack.value = fallback
+                audioEngine.restoreTrackState(fallback, 0L)
+            }
+        }
+    }
+
     fun togglePlayPause() {
         val player = audioEngine.exoPlayer
-        if (!isPlaying.value && (player?.currentMediaItem == null || player.mediaItemCount == 0)) {
+        val needsPrepare = player == null ||
+            player.playbackState == androidx.media3.common.Player.STATE_IDLE ||
+            player.playbackState == androidx.media3.common.Player.STATE_ENDED ||
+            player.currentMediaItem == null ||
+            player.mediaItemCount == 0
+        val currentlyPlaying = isPlaying.value || (player?.isPlaying == true)
+        if (!currentlyPlaying && needsPrepare) {
             resumeCurrentTrackFromSavedPosition()
         } else {
             hasUserInitiatedPlayback = true
@@ -331,7 +435,12 @@ class AudioPlaybackManager private constructor() {
 
     fun resume() {
         val player = audioEngine.exoPlayer
-        if (player?.currentMediaItem == null || player.mediaItemCount == 0) {
+        val needsPrepare = player == null ||
+            player.playbackState == androidx.media3.common.Player.STATE_IDLE ||
+            player.playbackState == androidx.media3.common.Player.STATE_ENDED ||
+            player.currentMediaItem == null ||
+            player.mediaItemCount == 0
+        if (needsPrepare) {
             resumeCurrentTrackFromSavedPosition()
         } else {
             hasUserInitiatedPlayback = true
@@ -396,9 +505,9 @@ class AudioPlaybackManager private constructor() {
         playFromContext(queue, nextIndex)
     }
 
-    fun previousTrack() {
+    fun previousTrack(forcePrevious: Boolean = false) {
         hasUserInitiatedPlayback = true
-        if (currentPositionMs.value > 3000L) {
+        if (!forcePrevious && currentPositionMs.value > 3000L) {
             audioEngine.seekTo(0L)
             persistPlaybackState()
             return
@@ -436,11 +545,34 @@ class AudioPlaybackManager private constructor() {
     }
 
     fun seekTo(positionMs: Long) {
-        audioEngine.seekTo(positionMs)
+        val track = _currentTrack.value
+        val maxSeek = if (track.durationMs > 300L) track.durationMs - 200L else track.durationMs
+        val clamped = if (maxSeek > 0L) positionMs.coerceIn(0L, maxSeek) else positionMs.coerceAtLeast(0L)
+        val player = audioEngine.exoPlayer
+        val needsPrepare = player == null ||
+            player.playbackState == androidx.media3.common.Player.STATE_IDLE ||
+            player.playbackState == androidx.media3.common.Player.STATE_ENDED ||
+            player.mediaItemCount == 0
+
+        if (needsPrepare) {
+            if (isPlaying.value) {
+                hasUserInitiatedPlayback = true
+                val queue = _playbackQueue.value.ifEmpty { repository.tracks.value }
+                val idx = queue.indexOfFirst { it.id == track.id }
+                if (idx >= 0) {
+                    playFromContext(queue, idx, startFromMs = clamped)
+                    return
+                }
+            }
+            audioEngine.restoreTrackState(track, clamped)
+        } else {
+            audioEngine.seekTo(clamped)
+        }
+
         repository.updateSettings {
             it.copy(
-                lastPlayedTrackId = _currentTrack.value.id,
-                lastPlayedPositionMs = positionMs,
+                lastPlayedTrackId = track.id,
+                lastPlayedPositionMs = clamped,
                 lastPlayedQueueIds = _playbackQueue.value.map { q -> q.id }
             )
         }

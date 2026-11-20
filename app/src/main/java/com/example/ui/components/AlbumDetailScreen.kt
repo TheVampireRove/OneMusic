@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -48,8 +50,11 @@ import com.example.model.AlbumArtSize
 import com.example.model.AlbumTrackOrderComparator
 import com.example.model.ElementColors
 import com.example.model.Track
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
 import com.example.ui.theme.OneUISquircleLarge
+import com.example.ui.theme.appSharedBounds
+import com.example.ui.theme.bouncableClick
 import com.example.ui.theme.glassmorphism
 import com.example.ui.theme.parseHexColor
 import kotlin.coroutines.cancellation.CancellationException
@@ -93,7 +98,7 @@ fun AlbumDetailScreen(
         modifier = modifier
             .fillMaxSize()
             .background(screenBg)
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
             .testTag("album_detail_screen")
     ) {
         // Navigation bar
@@ -103,13 +108,14 @@ fun AlbumDetailScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(
-                onClick = onBack,
+            Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(48.dp)
                     .clip(CircleShape)
                     .background(Color(0x22FFFFFF))
-                    .testTag("album_detail_back_button")
+                    .bouncableClick(onClick = onBack)
+                    .testTag("album_detail_back_button"),
+                contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -153,7 +159,8 @@ fun AlbumDetailScreen(
                             size = 170.dp,
                             cornerRadius = 24.dp,
                             isPlaying = isPlaying && currentTrack.album == albumName,
-                            showVinylPeek = true
+                            showVinylPeek = true,
+                            artSharedElementKey = "album_art_$albumName"
                         )
 
                         Spacer(modifier = Modifier.height(16.dp))
@@ -163,7 +170,11 @@ fun AlbumDetailScreen(
                             style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
                             color = Color.White,
                             maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.appSharedBounds(
+                                key = "album_title_$albumName",
+                                useScaleToBounds = true
+                            )
                         )
 
                         Text(
@@ -191,7 +202,7 @@ fun AlbumDetailScreen(
                                     .weight(1f)
                                     .clip(OneUIPillShape)
                                     .background(accentColor)
-                                    .clickable {
+                                    .bouncableClick {
                                         if (sortedTracks.isNotEmpty()) {
                                             onPlayFromContext(sortedTracks, 0)
                                         }
@@ -221,7 +232,7 @@ fun AlbumDetailScreen(
                                     .weight(1f)
                                     .clip(OneUIPillShape)
                                     .background(Color(0x25FFFFFF))
-                                    .clickable {
+                                    .bouncableClick {
                                         if (sortedTracks.isNotEmpty()) {
                                             onShuffleFromContext(sortedTracks)
                                         }
@@ -273,7 +284,12 @@ fun AlbumDetailScreen(
                     onToggleFavorite = { onToggleFavorite(track) },
                     albumArtSize = albumArtSize,
                     elementColors = elementColors,
-                    showTrackNumber = true
+                    showTrackNumber = true,
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = MotionSpecs.snappySpring(),
+                        placementSpec = MotionSpecs.LazyItemPlacementSpring,
+                        fadeOutSpec = MotionSpecs.snappySpring()
+                    )
                 )
             }
         }

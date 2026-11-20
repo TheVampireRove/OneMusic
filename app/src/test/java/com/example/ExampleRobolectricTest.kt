@@ -612,4 +612,495 @@ class ExampleRobolectricTest {
     assertEquals("", com.example.data.LyricsRepository.getEditableRawLyrics(context, track))
   }
 
+  @Test
+  fun `audio engine auto-recovers after released player and preserves playback state`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val manager = com.example.audio.AudioPlaybackManager.getInstance()
+    manager.initContext(context)
+    manager.ensureActivePlayer()
+
+    val firstPlayer = manager.audioEngine.exoPlayer
+    org.junit.Assert.assertNotNull(firstPlayer)
+    org.junit.Assert.assertTrue(manager.audioEngine.isCurrentlyAlive())
+
+    // Simulate OS / service killing the underlying ExoPlayer instance after inactivity
+    manager.audioEngine.markCurrentPlayerDeadForRecovery()
+    org.junit.Assert.assertFalse(manager.audioEngine.isCurrentlyAlive())
+
+    // Returning to app calls ensureActivePlayer(), which must seamlessly recreate a live ExoPlayer
+    manager.ensureActivePlayer()
+    val recoveredPlayer = manager.audioEngine.exoPlayer
+    org.junit.Assert.assertNotNull(recoveredPlayer)
+    org.junit.Assert.assertNotSame(firstPlayer, recoveredPlayer)
+    org.junit.Assert.assertTrue(manager.audioEngine.isCurrentlyAlive())
+  }
+
+  @Test
+  fun `android auto service paginates safely, searches tracks, and onDestroy does not kill in-app player`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val manager = com.example.audio.AudioPlaybackManager.getInstance()
+    manager.initContext(context)
+    manager.ensureActivePlayer()
+
+    val controller = org.robolectric.Robolectric.buildService(com.example.service.OneMusicAutoService::class.java)
+    val service = controller.create().get()
+
+    val largeList = (1..400).toList()
+    val maxSizedPage = service.paginateList(largeList, 0, Int.MAX_VALUE)
+    assertEquals(150, maxSizedPage.size)
+
+    val pageTwo = service.paginateList(largeList, 1, 100)
+    assertEquals(100, pageTwo.size)
+    assertEquals(101, pageTwo.first())
+
+    val rootChildren = service.buildChildrenPage(com.example.service.OneMusicAutoService.ROOT_ID, 0, 20)
+    assertEquals(4, rootChildren.size)
+
+    val searchMatches = service.findMatchingTracks("Cosmic")
+    org.junit.Assert.assertTrue(searchMatches.any { it.title.contains("Cosmic", ignoreCase = true) })
+
+    // Destroying the media service after idle disconnects must leave in-app ExoPlayer alive
+    controller.destroy()
+    org.junit.Assert.assertTrue(manager.audioEngine.isCurrentlyAlive())
+  }
+
+  @Test
+  fun `animated art repository resolves sidecar mp4, imports gif cover, clears cache, and persists settings`() = kotlinx.coroutines.test.runTest {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.data.AnimatedArtRepository.clearCache(context)
+
+    val tempDir = java.io.File(context.cacheDir, "sidecar_art_test").apply {
+      deleteRecursively()
+      mkdirs()
+    }
+    try {
+      val audioFile = java.io.File(tempDir, "song.mp3").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+      val sidecarMp4 = java.io.File(tempDir, "cover.mp4").apply { writeBytes(byteArrayOf(0, 0, 0, 24)) }
+      val trackWithSidecar = com.example.model.Track(
+        id = "anim_sidecar_1",
+        title = "Sidecar Track",
+        artist = "Folder Artist",
+        album = "Folder Album",
+        durationMs = 120_000L,
+        primaryColor = androidx.compose.ui.graphics.Color.Cyan,
+        secondaryColor = androidx.compose.ui.graphics.Color.Blue,
+        accentColor = androidx.compose.ui.graphics.Color.White,
+        genre = "Electronic",
+        coverType = com.example.model.CoverArtType.NEON,
+        isLocalFile = true,
+        uriString = android.net.Uri.fromFile(audioFile).toString()
+      )
+
+      val resolvedSidecar = com.example.data.AnimatedArtRepository.resolveAnimatedCover(
+        context = context,
+        track = trackWithSidecar,
+        enableAnimatedCovers = true,
+        autoFetchWifiOnly = true
+      )
+      org.junit.Assert.assertTrue(resolvedSidecar is com.example.data.AnimatedCoverMedia.VideoLoop)
+      assertEquals(sidecarMp4.absolutePath, (resolvedSidecar as com.example.data.AnimatedCoverMedia.VideoLoop).localPath)
+
+      val disabledResult = com.example.data.AnimatedArtRepository.resolveAnimatedCover(
+        context = context,
+        track = trackWithSidecar,
+        enableAnimatedCovers = false,
+        autoFetchWifiOnly = true
+      )
+      assertEquals(com.example.data.AnimatedCoverMedia.None, disabledResult)
+
+      // Import custom animated GIF cover for an album without sidecar
+      val gifSource = java.io.File(tempDir, "loop.gif").apply {
+        writeBytes("GIF89a".toByteArray())
+      }
+      val customTrack = trackWithSidecar.copy(
+        id = "anim_import_2",
+        album = "Imported GIF Album",
+        uriString = null
+      )
+      val imported = com.example.data.AnimatedArtRepository.importAnimatedCover(
+        context = context,
+        track = customTrack,
+        sourceUri = android.net.Uri.fromFile(gifSource)
+      )
+      org.junit.Assert.assertTrue(imported is com.example.data.AnimatedCoverMedia.AnimatedImage)
+      org.junit.Assert.assertTrue(
+        com.example.data.AnimatedArtRepository.getCachedOrSidecarImmediate(context, customTrack)
+          is com.example.data.AnimatedCoverMedia.AnimatedImage
+      )
+
+      val statsBeforeClear = com.example.data.AnimatedArtRepository.getCacheStats(context)
+      assertEquals(1, statsBeforeClear.first)
+      org.junit.Assert.assertTrue(statsBeforeClear.second > 0L)
+
+      val cleared = com.example.data.AnimatedArtRepository.clearCache(context)
+      assertEquals(1, cleared)
+      assertEquals(0, com.example.data.AnimatedArtRepository.getCacheStats(context).first)
+
+      // Settings persistence for animated covers
+      val customSettings = com.example.model.AppSettings(
+        enableAnimatedCovers = false,
+        autoFetchAnimatedCoversWifiOnly = false,
+        simulateMotionOnStaticCovers = false
+      )
+      com.example.data.AppSettingsCache.saveSettings(context, customSettings)
+      val loaded = com.example.data.AppSettingsCache.loadSettings(context)
+      org.junit.Assert.assertFalse(loaded.enableAnimatedCovers)
+      org.junit.Assert.assertFalse(loaded.autoFetchAnimatedCoversWifiOnly)
+      org.junit.Assert.assertFalse(loaded.simulateMotionOnStaticCovers)
+    } finally {
+      tempDir.deleteRecursively()
+      com.example.data.AnimatedArtRepository.clearCache(context)
+    }
+  }
+
+  @Test
+  fun `viewmodel preserves display mode seamlessly when entering and exiting tabletop mode`() {
+    val viewModel = com.example.viewmodel.MusicPlayerViewModel()
+    assertEquals(com.example.ui.components.DisplayMode.ARTWORK, viewModel.displayMode.value)
+
+    viewModel.setDisplayMode(com.example.ui.components.DisplayMode.LYRICS)
+    viewModel.setFlexMode(true)
+    assertEquals(com.example.ui.components.DisplayMode.LYRICS, viewModel.displayMode.value)
+
+    viewModel.setDisplayMode(com.example.ui.components.DisplayMode.VISUALIZER)
+    viewModel.setFlexMode(false)
+    assertEquals(com.example.ui.components.DisplayMode.VISUALIZER, viewModel.displayMode.value)
+  }
+
+  @Test
+  fun `artwork matcher strictly verifies artist album and track and restore default permanently prevents re-fetch`() = kotlinx.coroutines.test.runTest {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.data.AnimatedArtRepository.clearCache(context)
+
+    val lutherTrack = com.example.model.Track(
+      id = "luther_1",
+      title = "Love Won't Let Me Wait",
+      artist = "Luther Vandross",
+      album = "The Best of Luther Vandross... The Best of Love",
+      durationMs = 439_000L,
+      primaryColor = androidx.compose.ui.graphics.Color.Cyan,
+      secondaryColor = androidx.compose.ui.graphics.Color.Blue,
+      accentColor = androidx.compose.ui.graphics.Color.White,
+      genre = "R&B",
+      coverType = com.example.model.CoverArtType.NEON,
+      isLocalFile = true,
+      hasEmbeddedArt = true
+    )
+
+    // 1. Mismatched artist & album (Best of Alexander O'Neal) MUST be rejected
+    val wrongOnlyJson = """
+      {
+        "resultCount": 1,
+        "results": [
+          {
+            "artistName": "Alexander O'Neal",
+            "collectionName": "Best of Alexander O'Neal",
+            "artworkUrl100": "https://example.com/alexander_100x100bb.jpg"
+          }
+        ]
+      }
+    """.trimIndent()
+    org.junit.Assert.assertNull(
+      com.example.data.AnimatedArtRepository.pickBestVerifiedAlbumCandidate(lutherTrack, wrongOnlyJson)
+    )
+
+    // 2. Same artist with wrong album MUST be rejected
+    val wrongAlbumSameArtistJson = """
+      {
+        "resultCount": 1,
+        "results": [
+          {
+            "artistName": "Luther Vandross",
+            "collectionName": "Dance with My Father",
+            "artworkUrl100": "https://example.com/dance_100x100bb.jpg"
+          }
+        ]
+      }
+    """.trimIndent()
+    org.junit.Assert.assertNull(
+      com.example.data.AnimatedArtRepository.pickBestVerifiedAlbumCandidate(lutherTrack, wrongAlbumSameArtistJson)
+    )
+
+    // 3. Mixed results: skips mismatched Alexander O'Neal at index 0 and selects verified Luther Vandross at index 1
+    val mixedJson = """
+      {
+        "resultCount": 2,
+        "results": [
+          {
+            "artistName": "Alexander O'Neal",
+            "collectionName": "Best of Alexander O'Neal",
+            "artworkUrl100": "https://example.com/alexander_100x100bb.jpg"
+          },
+          {
+            "artistName": "Luther Vandross",
+            "collectionName": "The Best of Luther Vandross",
+            "artworkUrl100": "https://example.com/luther_100x100bb.jpg"
+          }
+        ]
+      }
+    """.trimIndent()
+    val picked = com.example.data.AnimatedArtRepository.pickBestVerifiedAlbumCandidate(lutherTrack, mixedJson)
+    org.junit.Assert.assertNotNull(picked)
+    assertEquals("https://example.com/luther_1000x1000bb.jpg", picked?.url)
+
+    // 4. Song fallback verifies artist + track title and refuses unrelated compilation albums when track has a real album
+    val songFallbackJson = """
+      {
+        "resultCount": 2,
+        "results": [
+          {
+            "artistName": "Luther Vandross",
+            "trackName": "Love Won't Let Me Wait",
+            "collectionName": "80s Soul Classics Compilation",
+            "artworkUrl100": "https://example.com/comp_100x100bb.jpg"
+          },
+          {
+            "artistName": "Luther Vandross",
+            "trackName": "Love Won't Let Me Wait",
+            "collectionName": "The Best of Luther Vandross... The Best of Love",
+            "artworkUrl100": "https://example.com/luther_song_100x100bb.jpg"
+          }
+        ]
+      }
+    """.trimIndent()
+    val songPicked = com.example.data.AnimatedArtRepository.pickBestVerifiedSongCandidate(lutherTrack, songFallbackJson)
+    org.junit.Assert.assertNotNull(songPicked)
+    assertEquals("https://example.com/luther_song_1000x1000bb.jpg", songPicked?.url)
+
+    // Unknown album tracks must not share the same cache key
+    val genericA = lutherTrack.copy(id = "g1", title = "Song A", album = "Unknown Album")
+    val genericB = lutherTrack.copy(id = "g2", title = "Song B", album = "Unknown Album")
+    org.junit.Assert.assertNotEquals(
+      com.example.data.AnimatedArtRepository.coverCacheKey(genericA),
+      com.example.data.AnimatedArtRepository.coverCacheKey(genericB)
+    )
+
+    // 5. Restore Default Artwork deletes custom/cached cover AND prevents auto-fetch from re-downloading it
+    val tempDir = java.io.File(context.cacheDir, "restore_default_test").apply {
+      deleteRecursively()
+      mkdirs()
+    }
+    try {
+      val customJpg = java.io.File(tempDir, "custom.jpg").apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
+      val imported = com.example.data.AnimatedArtRepository.importAnimatedCover(
+        context = context,
+        track = lutherTrack,
+        sourceUri = android.net.Uri.fromFile(customJpg)
+      )
+      org.junit.Assert.assertTrue(imported is com.example.data.AnimatedCoverMedia.HighResArtwork)
+      org.junit.Assert.assertNotEquals(
+        com.example.data.AnimatedCoverMedia.None,
+        com.example.data.AnimatedArtRepository.getCachedOrSidecarImmediate(context, lutherTrack)
+      )
+
+      var networkFetchInvoked = false
+      com.example.data.AnimatedArtRepository.networkFetcherOverride = {
+        networkFetchInvoked = true
+        com.example.data.AnimatedCoverCandidate(
+          url = "https://example.com/should_not_refetch.jpg",
+          kind = com.example.data.AnimatedCoverCandidate.Kind.HIGH_RES_IMAGE
+        )
+      }
+
+      com.example.data.AnimatedArtRepository.removeCustomCover(context, lutherTrack)
+      org.junit.Assert.assertTrue(com.example.data.AnimatedArtRepository.isRestoredToDefault(context, lutherTrack))
+      assertEquals(
+        com.example.data.AnimatedCoverMedia.None,
+        com.example.data.AnimatedArtRepository.getCachedOrSidecarImmediate(context, lutherTrack)
+      )
+
+      // Resolving again (as AnimatedAlbumCover's LaunchedEffect does on cacheVersion bump) must stay None
+      val afterRestore = com.example.data.AnimatedArtRepository.resolveAnimatedCover(
+        context = context,
+        track = lutherTrack,
+        enableAnimatedCovers = true,
+        autoFetchWifiOnly = false
+      )
+      assertEquals(com.example.data.AnimatedCoverMedia.None, afterRestore)
+      org.junit.Assert.assertFalse(networkFetchInvoked)
+
+      // Explicitly importing a new custom file later clears the restore-default suppression
+      val reImported = com.example.data.AnimatedArtRepository.importAnimatedCover(
+        context = context,
+        track = lutherTrack,
+        sourceUri = android.net.Uri.fromFile(customJpg)
+      )
+      org.junit.Assert.assertTrue(reImported is com.example.data.AnimatedCoverMedia.HighResArtwork)
+      org.junit.Assert.assertFalse(com.example.data.AnimatedArtRepository.isRestoredToDefault(context, lutherTrack))
+    } finally {
+      com.example.data.AnimatedArtRepository.networkFetcherOverride = null
+      tempDir.deleteRecursively()
+      com.example.data.AnimatedArtRepository.clearCache(context)
+    }
+  }
+
+  @Test
+  fun `import track id resolution is deterministic and avoids duplicate local and scanned tracks`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // 1. Android MediaStore audio URI resolves directly to canonical device_media_<id>
+    val mediaStoreUri = android.net.Uri.parse("content://media/external/audio/media/918273")
+    assertEquals(
+      "device_media_918273",
+      com.example.data.LocalMediaManager.resolveImportTrackId(context, mediaStoreUri)
+    )
+
+    // 2. DocumentsProvider media document URI (com.android.providers.media.documents audio:<id>) resolves canonically
+    val mediaDocUri = android.provider.DocumentsContract.buildDocumentUri(
+      "com.android.providers.media.documents",
+      "audio:556677"
+    )
+    assertEquals(
+      "device_media_556677",
+      com.example.data.LocalMediaManager.resolveImportTrackId(context, mediaDocUri)
+    )
+
+    // 3. Generic storage document URI produces a deterministic local_<hash> instead of random UUIDs
+    val externalUri = android.net.Uri.parse("content://com.android.externalstorage.documents/document/primary%3AMusic%2FTrack.mp3")
+    val firstHashId = com.example.data.LocalMediaManager.resolveImportTrackId(context, externalUri)
+    val secondHashId = com.example.data.LocalMediaManager.resolveImportTrackId(context, externalUri)
+    org.junit.Assert.assertTrue(firstHashId.startsWith("local_"))
+    assertEquals(firstHashId, secondHashId)
+  }
+
+  @Test
+  fun `repository deduplicates cross-source imports, upgrades local to canonical device id, and supports undo removal`() {
+    val repo = com.example.data.MusicRepository.getInstance()
+    val pickedId = "local_deadbeef1234567890abcd"
+    val scannedId = "device_media_88001"
+    val legacyDupId = "local_legacy_dup_88001"
+
+    try {
+      // Ensure clean starting state for test IDs
+      repo.removeTracksByIds(setOf(pickedId, scannedId, legacyDupId))
+
+      val pickedTrack = com.example.model.Track(
+        id = pickedId,
+        title = "midnight drive",
+        artist = "Neon Echoes",
+        album = "Device Storage",
+        durationMs = 204_000L,
+        primaryColor = androidx.compose.ui.graphics.Color.Cyan,
+        secondaryColor = androidx.compose.ui.graphics.Color.Blue,
+        accentColor = androidx.compose.ui.graphics.Color.White,
+        genre = "Audio File",
+        coverType = com.example.model.CoverArtType.NEON,
+        uriString = "content://com.android.externalstorage.documents/document/primary%3AMidnightDrive.flac",
+        lyrics = listOf(com.example.model.LyricLine(0L, "Saved user lyric")),
+        isFavorite = true,
+        isLocalFile = true
+      )
+
+      // First import succeeds cleanly
+      val firstImport = repo.addTracksWithReport(listOf(pickedTrack))
+      assertEquals(1, firstImport.addedTracks.size)
+      assertEquals(0, firstImport.skippedDuplicates)
+
+      // Re-importing the exact same track skips creating a duplicate
+      val duplicateImport = repo.addTracksWithReport(listOf(pickedTrack))
+      assertEquals(0, duplicateImport.addedTracks.size)
+      assertEquals(1, duplicateImport.skippedDuplicates)
+
+      // Scanning Storage later discovers the same audio file via MediaStore ID `device_media_88001`
+      val scannedMatch = pickedTrack.copy(
+        id = scannedId,
+        title = "Midnight Drive",
+        album = "City Lights EP",
+        durationMs = 204_800L,
+        uriString = "content://media/external/audio/media/88001",
+        lyrics = emptyList(),
+        isFavorite = false,
+        trackNumber = 3,
+        discNumber = 1
+      )
+      val scanResult = repo.addTracksWithReport(listOf(scannedMatch))
+      assertEquals(0, scanResult.addedTracks.size)
+      assertEquals(scannedId, scanResult.remappedIds[pickedId])
+
+      // Upheld canonical track preserves user favorite + lyrics while adopting canonical ID & metadata
+      org.junit.Assert.assertNull(repo.tracks.value.find { it.id == pickedId })
+      val upgraded = repo.tracks.value.first { it.id == scannedId }
+      org.junit.Assert.assertTrue(upgraded.isFavorite)
+      assertEquals(1, upgraded.lyrics.size)
+      assertEquals("City Lights EP", upgraded.album)
+      assertEquals(3, upgraded.trackNumber)
+
+      // Simulate legacy pre-fix duplicate entry and verify findDuplicateLocalTracks + removeDuplicateTracks merges it
+      repo.seedLegacyTracksRaw(
+        listOf(
+          pickedTrack.copy(
+            id = legacyDupId,
+            title = "Midnight Drive",
+            album = "City Lights EP",
+            durationMs = 204_000L,
+            isFavorite = false,
+            lyrics = emptyList()
+          )
+        )
+      )
+      val detectedDups = repo.findDuplicateLocalTracks()
+      org.junit.Assert.assertTrue(detectedDups.isNotEmpty())
+
+      val dedupResult = repo.removeDuplicateTracks()
+      org.junit.Assert.assertTrue(dedupResult.removedIds.contains(legacyDupId))
+      org.junit.Assert.assertNull(repo.tracks.value.find { it.id == legacyDupId })
+      org.junit.Assert.assertNotNull(repo.tracks.value.find { it.id == scannedId })
+
+      // Undo / explicit removal removes the imported track from the repository cleanly
+      val removed = repo.removeTracksByIds(setOf(scannedId))
+      assertEquals(1, removed.size)
+      org.junit.Assert.assertNull(repo.tracks.value.find { it.id == scannedId })
+    } finally {
+      repo.removeTracksByIds(setOf(pickedId, scannedId, legacyDupId))
+    }
+  }
+
+  @Test
+  fun `playback manager remaps upgraded ids and removes deleted imported tracks from queue`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = com.example.data.MusicRepository.getInstance()
+    val manager = com.example.audio.AudioPlaybackManager.getInstance()
+    manager.initContext(context)
+
+    val tempLocalId = "local_queue_test_11"
+    val canonicalId = "device_media_77441"
+
+    try {
+      repo.removeTracksByIds(setOf(tempLocalId, canonicalId))
+      val imported = com.example.model.Track(
+        id = tempLocalId,
+        title = "Queue Test Song",
+        artist = "Queue Artist",
+        album = "Device Storage",
+        durationMs = 180_000L,
+        primaryColor = androidx.compose.ui.graphics.Color.Magenta,
+        secondaryColor = androidx.compose.ui.graphics.Color.Cyan,
+        accentColor = androidx.compose.ui.graphics.Color.White,
+        genre = "Audio File",
+        coverType = com.example.model.CoverArtType.NEON,
+        isLocalFile = true
+      )
+      repo.addTracksWithReport(listOf(imported))
+      manager.playTrack(imported)
+      assertEquals(tempLocalId, manager.currentTrack.value.id)
+
+      // Scan Storage upgrades ID to canonicalId and remaps playback queue + active track
+      val scanned = imported.copy(id = canonicalId, album = "Real Album")
+      val result = repo.addTracksWithReport(listOf(scanned))
+      manager.removeOrRemapTracks(removedIds = emptySet(), remappedIds = result.remappedIds)
+      assertEquals(canonicalId, manager.currentTrack.value.id)
+      org.junit.Assert.assertTrue(manager.playbackQueue.value.any { it.id == canonicalId })
+      org.junit.Assert.assertFalse(manager.playbackQueue.value.any { it.id == tempLocalId })
+
+      // Removing/undoing the track drops it from queue and falls back safely
+      repo.removeTracksByIds(setOf(canonicalId))
+      manager.removeOrRemapTracks(removedIds = setOf(canonicalId))
+      org.junit.Assert.assertNotEquals(canonicalId, manager.currentTrack.value.id)
+      org.junit.Assert.assertFalse(manager.playbackQueue.value.any { it.id == canonicalId })
+    } finally {
+      repo.removeTracksByIds(setOf(tempLocalId, canonicalId))
+    }
+  }
+
 }
+

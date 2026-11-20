@@ -1,7 +1,8 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +19,6 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -33,7 +33,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.Track
+import com.example.ui.theme.MotionSpecs
 import com.example.ui.theme.OneUIPillShape
+import com.example.ui.theme.appSharedBounds
+import com.example.ui.theme.bouncableClick
 import com.example.ui.theme.glassmorphism
 
 @Composable
@@ -54,6 +57,10 @@ fun MiniPlayer(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 6.dp)
+            .appSharedBounds(
+                key = "player_container",
+                clipShape = OneUIPillShape
+            )
             .testTag("mini_player")
             .shadow(12.dp, OneUIPillShape, clip = false)
             .background(Color(0xFA16182B), OneUIPillShape)
@@ -62,7 +69,7 @@ fun MiniPlayer(
                 backgroundColor = Color(0xCC222540),
                 borderWidth = 1.2.dp
             )
-            .clickable(onClick = onExpand)
+            .bouncableClick(pressedScale = 0.96f, onClick = onExpand)
     ) {
         Column {
             Row(
@@ -71,13 +78,14 @@ fun MiniPlayer(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Album Art
+                // Album Art morphing seamlessly into full-screen Now Playing hero cover
                 CoverArtView(
                     track = track,
                     size = 46.dp,
                     cornerRadius = 14.dp,
                     isPlaying = isPlaying,
-                    showVinylPeek = false
+                    showVinylPeek = false,
+                    artSharedElementKey = "player_artwork_${track.id}"
                 )
 
                 Spacer(modifier = Modifier.width(12.dp))
@@ -92,7 +100,14 @@ fun MiniPlayer(
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                         color = Color.White,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .appSharedBounds(
+                                key = "player_title_${track.id}",
+                                useScaleToBounds = true
+                            )
+                            .basicMarquee(iterations = Int.MAX_VALUE)
                     )
                     Text(
                         text = "${track.artist} • ${track.album}",
@@ -103,24 +118,30 @@ fun MiniPlayer(
                     )
                 }
 
-                // Play / Pause Button
+                // Play / Pause Button with smooth scale+fade icon morph and tactile press
                 OneUITooltipButton(
                     name = if (isPlaying) "Pause Playback" else "Play Track",
                     onClick = onTogglePlayPause
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(42.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .testTag("mini_play_pause_button"),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
-                            tint = track.accentColor,
-                            modifier = Modifier.size(26.dp)
-                        )
+                        AnimatedContent(
+                            targetState = isPlaying,
+                            transitionSpec = { MotionSpecs.iconMorphTransition() },
+                            label = "mini_play_pause_morph"
+                        ) { playing ->
+                            Icon(
+                                imageVector = if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (playing) "Pause" else "Play",
+                                tint = track.accentColor,
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
                     }
                 }
 
@@ -131,7 +152,7 @@ fun MiniPlayer(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(38.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .testTag("mini_next_button"),
                         contentAlignment = Alignment.Center
